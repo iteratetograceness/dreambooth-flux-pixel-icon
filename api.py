@@ -1,8 +1,10 @@
+import base64
 from dataclasses import dataclass
 from fastapi import FastAPI, Response, Request, status
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from fastapi.middleware.cors import CORSMiddleware
 from modal import App, Image, Volume, Secret, gpu, enter, method, asgi_app, parameter
 from pydantic import BaseModel
 import io
@@ -59,6 +61,18 @@ flux_image = flux_image.env(
 )
 
 web_app = FastAPI(title="Pixel API", description="Generate pixel icons")
+
+web_app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",
+        "http://127.0.0.1:3000",
+    ],
+    allow_credentials=True,
+    allow_methods=["POST", "OPTIONS"],
+    allow_headers=["Content-Type"],
+)
+
 app = App(name="pixel-api", image=flux_image)
 
 huggingface_secret = Secret.from_name(
@@ -70,15 +84,16 @@ class InputModel(BaseModel):
     num_outputs: int = 1
     seed: int | None = None
 
-@dataclass
-class InferenceConfig:
+class InferenceConfig(BaseModel):
     num_inference_steps: int = 50
     guidance_scale: float = 7.5
     num_outputs: int = 1
     seed: int | None = None
 
+# Brainstorm: A single PixelModel class, initialized once on the API (need to look into persistence)
+# Then, hot-swappable LoRA weights via a different method (e.g. load_weights)?For later: when b&w LoRA is ready.
+
 @app.cls(
-    # image=image,
     gpu=gpu.H100(),
     volumes={
         **VOLUME_CONFIG,
@@ -90,24 +105,43 @@ class InferenceConfig:
     secrets=[huggingface_secret],
     container_idle_timeout=20 * 60,
     timeout=60 * 60,
+    allow_concurrent_inputs=1,
+    memory=32768
 )
 class PixelColorModel:
     compile: int = parameter(default=0)
     
     @enter()
     def load_model(self):
-        import torch
-        from diffusers import FluxPipeline
-        
-        # Reload the modal.Volume to ensure the latest state is accessible:
-        volume.reload()
-        
-        pipeline = FluxPipeline.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16).to('cuda')
-        
-        lora_path = f"{MODEL_DIR}/{PIXEL_COLOR_DIR}"
-        pipeline.load_lora_weights(lora_path, weight_name='pytorch_lora_weights.safetensors')
-        
-        self.pipeline = optimize(pipeline, compile=bool(self.compile))
+        try:
+            print("🔥 Starting model load...")
+            
+            import torch
+            from diffusers import AutoPipelineForText2Image
+            
+            volume.reload() 
+            
+            dir = f"{MODEL_DIR}/{PIXEL_COLOR_DIR}"
+            
+            print("🤗 Loading pipeline...")
+            pipeline = AutoPipelineForText2Image.from_pretrained(
+                "black-forest-labs/FLUX.1-dev", 
+                torch_dtype=torch.bfloat16,
+            ).to('cuda')
+            print("⚡ Optimizing pipeline...")
+            self.pipeline = optimize(pipeline, compile=bool(self.compile))
+               
+            # Q: Hot-swappable LoRA weights via different method?          
+            print("🎯 Loading LoRA weights...")
+            self.pipeline.load_lora_weights(dir, weight_name='pytorch_lora_weights.safetensors')
+            
+            print("✨ Model load complete!")
+            torch.cuda.synchronize()
+        except Exception as e:
+            print(f"❌ ERROR during model initialization: {str(e)}")
+            import traceback
+            print(traceback.format_exc())
+            raise
 
     @method()
     def inference(self, text: str, config: InferenceConfig):
@@ -140,35 +174,63 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 
 @web_app.post("/v1/pixel-color")
 async def generate_pixel_color(input: InputModel):
-    model = PixelColorModel(compile=1)
-    prompt = f"a PXCON, a 16-bit pixel art icon of {input.prompt}"
-    print(f"Prompt: {prompt}")
-    images = model.inference.remote(
-        text=prompt,
-        config=InferenceConfig(
-            num_outputs=input.num_outputs,
-            seed=input.seed
+    try:
+        prompt = f"a PXCON, a 16-bit pixel art icon of {input.prompt}"
+        print(f"Starting inference with prompt: {prompt}")
+        
+        # Use the class instance's remote method
+        images = pixel_model.inference.remote(
+            text=prompt,
+            config=InferenceConfig(
+                num_outputs=input.num_outputs,
+                seed=input.seed
+            ),
         )
-    )
-    return JSONResponse(content={"images": images})
+        
+        base64_images = [base64.b64encode(img).decode('utf-8') for img in images]
+        print(f"Inference completed, got {len(images)} images!")
+        
+        return JSONResponse(content={"images": base64_images})
+    except Exception as e:
+        print(f"Error in generate_pixel_color: {str(e)}")
+        return JSONResponse(
+            status_code=500,
+            content={"detail": str(e)}
+        )
 
 @app.function(
-    # image=image,
     volumes=VOLUME_CONFIG,
-    secrets=[huggingface_secret]
+    secrets=[huggingface_secret],
+    timeout=1800,
+    memory=8192
 )
 @asgi_app(label="pixel-api")
 def fastapi_app():
-    return web_app
+    try:
+        print("Starting FastAPI app initialization...")
+        global pixel_model
+        pixel_model = PixelColorModel(compile=1)
+        print("FastAPI app initialization complete!")
+        return web_app
+    except Exception as e:
+        print(f"ERROR during FastAPI app initialization: {str(e)}")
+        import traceback
+        print(traceback.format_exc())
+        # Re-raise the error to ensure Modal knows something went wrong
+        raise
 ## END WEB APP IMPLEMENTATION ##
 
 # Source: https://modal.com/docs/examples/flux#run-flux-fast-on-h100s-with-torchcompile
+# Specifics w/ LoRA: https://github.com/huggingface/diffusers/issues/9279
 def optimize(pipe, compile=True):
     import torch
     
+    print("🔄 Starting optimization process...")
+    
+    # Skip QKV fusion since it breaks LoRA   
     # fuse QKV projections in Transformer and VAE
-    pipe.transformer.fuse_qkv_projections()
-    pipe.vae.fuse_qkv_projections()
+    # pipe.transformer.fuse_qkv_projections()
+    # pipe.vae.fuse_qkv_projections()
 
     # switch memory layout to Torch's preferred, channels_last
     pipe.transformer.to(memory_format=torch.channels_last)
@@ -194,15 +256,23 @@ def optimize(pipe, compile=True):
         pipe.vae.decode, mode="max-autotune", fullgraph=True
     )
 
-    # trigger torch compilation
+    # trigger torch compilation with LoRA weights
     print("🔦 Running torch compilation (may take up to 20 minutes)...")
 
+    # Run a test inference to verify everything
     pipe(
-        "a dummy prompt to trigger torch compilation",
+        "test compilation with LoRA weights",
         output_type="pil",
-        num_inference_steps=50,
+        num_inference_steps=1,
     ).images[0]
+    # pipe.transformer = torch.compile(
+    #     pipe.transformer, mode="max-autotune", fullgraph=True
+    # )
+    # pipe.vae.decode = torch.compile(
+    #     pipe.vae.decode, mode="max-autotune", fullgraph=True
+    # )
 
     print("🔦 Finished torch compilation")
+    print("✅ Model optimization complete with LoRA weights verified")
 
     return pipe
