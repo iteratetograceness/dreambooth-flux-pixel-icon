@@ -1,7 +1,6 @@
 from dataclasses import dataclass
 from pathlib import Path
 import itertools
-import modal
 from modal import App, Image, gpu, Secret, Volume, enter, method
 
 FOLDER_1 = "lr_1e-06_steps_4000_rank_8"
@@ -159,49 +158,6 @@ def train(config):
     )
     volume.commit()
 
-@app.cls(
-    image=image,
-    gpu=gpu.H100(),
-    volumes=VOLUME_CONFIG,
-    secrets=[huggingface_secret] 
-)
-class Model:
-    @enter()
-    def load_model(self):
-        import torch
-        from diffusers import AutoPipelineForText2Image
-
-        # Reload the modal.Volume to ensure the latest state is accessible.
-        volume.reload()
-        
-        pipeline = AutoPipelineForText2Image.from_pretrained("black-forest-labs/FLUX.1-dev", torch_dtype=torch.bfloat16).to('cuda')
-        
-        # TODO: Load from Volume:
-        pipeline.load_lora_weights(f'graceyun/{FOLDER_3}', weight_name='pytorch_lora_weights.safetensors')
-        
-        self.pipeline = pipeline
-
-    @method()
-    def inference(self, text, config):
-        image = self.pipeline(
-            text,
-            num_inference_steps=config.num_inference_steps,
-            guidance_scale=config.guidance_scale,
-        ).images[0]
-        
-        # Create a new directory for generated images, if it doesn't exist:
-        output_dir = Path(f"{MODEL_DIR}/{FOLDER_3}/generated_images")
-        output_dir.mkdir(parents=True, exist_ok=True)
-        safe_filename = text.replace('/', '_').replace(' ', '_')
-        output_path = output_dir /f"{safe_filename}.png"
-        image.save(output_path)
-        volume.commit()
-    
-@dataclass
-class InferenceConfig:
-    num_inference_steps: int = 50
-    guidance_scale: float = 7.5
-    
 @app.local_entrypoint()
 def run():    
     print("🎨 Training model")
