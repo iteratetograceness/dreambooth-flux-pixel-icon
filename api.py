@@ -44,6 +44,7 @@ flux_image = (
         "safetensors==0.4.4",
         "sentencepiece==0.2.0",
         "torch==2.5.0",
+        "peft",
         f"git+https://github.com/huggingface/diffusers.git@{diffusers_commit_sha}",
         "numpy<2",
     )
@@ -141,12 +142,15 @@ async def validation_exception_handler(request: Request, exc: RequestValidationE
 async def generate_pixel_color(input: InputModel):
     model = PixelColorModel(compile=1)
     prompt = f"a PXCON, a 16-bit pixel art icon of {input.prompt}"
+    print(f"Prompt: {prompt}")
     images = model.inference.remote(
-        prompt=prompt,
-        num_outputs=input.num_outputs,
-        seed=input.seed
+        text=prompt,
+        config=InferenceConfig(
+            num_outputs=input.num_outputs,
+            seed=input.seed
+        )
     )
-    return Response(content=images[0], media_type="image/png")
+    return JSONResponse(content={"images": images})
 
 @app.function(
     # image=image,
