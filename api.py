@@ -159,7 +159,7 @@ class InferenceConfig(BaseModel):
 class PixelColorModel:
     # Add a parameter to determine which weights to load
     style: str = parameter(default=DEFAULT_STYLE)
-    compile: bool = parameter(default=False)
+    compile: int = parameter(default=0)
     
     @enter()
     def load_model(self):
