@@ -102,4 +102,3 @@ def update_to_huggingface():
     dataset.push_to_hub(dataset_name, private=True)
     print('\nDataset uploaded!')
     
-update_to_huggingface()
