@@ -1,4 +1,4 @@
-from modal import App, Image as ModalImage, Volume, Secret, gpu, asgi_app, enter, parameter, method
+from modal import App, Image as ModalImage, Volume, Secret, gpu, asgi_app, enter, method
 from pydantic import BaseModel
 from enum import Enum
 
@@ -20,6 +20,9 @@ DEFAULT_STYLE = "color_v2"
 huggingface_secret = Secret.from_name("huggingface-secret")
 auth_token = Secret.from_name("pixel-auth-token")
 recraft_api_key = Secret.from_name("recraft-api-key")
+supabase_url = Secret.from_name("supabase-url")
+supabase_service_role_key = Secret.from_name("supabase-service-role-key")
+supabase_jwt_secret = Secret.from_name("supabase-jwt-secret")
 
 class InputModel(BaseModel):
     prompt: str
@@ -48,6 +51,9 @@ api_image = (
     .pip_install(
         "fastapi[standard]",
         "pydantic>=2.0",
+        "supabase",
+        "aiohttp",
+        "pyjwt[crypto]",
     )
 )
 
@@ -81,7 +87,7 @@ app = App(name="pixel-api")
 
 @app.function(
     image=api_image,
-    secrets=[auth_token],
+    secrets=[auth_token, supabase_url, supabase_service_role_key, supabase_jwt_secret],
     container_idle_timeout=300,
 )
 @asgi_app(label="pixel-api")
@@ -93,7 +99,6 @@ def web_app():
     from fastapi.exceptions import RequestValidationError
     from fastapi.responses import JSONResponse
     from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-    import modal
 
     auth_scheme = HTTPBearer()
     base_url = web_app.web_url
@@ -163,9 +168,30 @@ def web_app():
         except Exception as e:
             print(f"❌ Error in warm-up process: {str(e)}")
 
+    def validate_supabase_jwt(token):
+        try:
+            import jwt
+        
+            payload = jwt.decode(
+                token,
+                os.environ["SUPABASE_JWT_SECRET"],
+                algorithms=["HS256"],
+                options={"verify_aud": False}
+            )
+            
+            user_id = payload.get("sub")
+            if not user_id:
+                raise ValueError("User ID not found in token")
+            
+            return user_id
+        except Exception as e:
+            print(f"❌ Error validating Supabase JWT: {str(e)}")
+            return None
+            
     @api.post("/v1/pixel")
-    async def generate(body: BodyModel, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
+    async def generate(body: BodyModel, request: Request, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
         from api import process_pixel_job
+        from supabase import create_client
             
         try:
             if token.credentials != os.environ["PIXEL_AUTH_TOKEN"]:
@@ -174,12 +200,40 @@ def web_app():
                     content={"detail": "Unauthorized"},
                     headers={"WWW-Authenticate": "Bearer"},
                 )
+                
+            supabase_token = request.headers.get("X-Supabase-Auth")
+            if not supabase_token:
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Supabase authentication required"},
+                )
+            
+            user_id = validate_supabase_jwt(supabase_token)
+            if not user_id:
+                return JSONResponse(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    content={"detail": "Invalid Supabase token"},
+                )
             
             style = body.input.style
             prefix = STYLE_CONFIGS[style]['prompt_prefix'] if style in STYLE_CONFIGS else ""
             prompt = f"{prefix}{body.input.prompt}" if prefix else body.input.prompt
             
             print(f"🔦 Submitting job for prompt: {prompt}")
+            
+            supabase = create_client(
+                supabase_url=os.environ["SUPABASE_URL"],
+                supabase_key=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+            )
+             
+            result = supabase.table("jobs").insert({
+                "user_id": user_id,
+                "prompt": prompt,
+                "style": style,
+                "status": JobStatus.QUEUED
+            }).execute()
+            
+            job_id = result.data[0]['id']
             
             callback_url = f"{base_url}/v1/pixel/callback"
             
@@ -188,11 +242,20 @@ def web_app():
                 "num_inference_steps": NUM_INFERENCE_STEPS,
                 "guidance_scale": GUIDANCE_SCALE,
                 "num_outputs": NUM_OUTPUTS,
-                "seed": SEED
+                "seed": SEED,
             }
             
-            call = process_pixel_job.spawn(prompt, config, callback_url)
-            job_id = call.object_id
+            metadata = {
+                "job_id": job_id,
+                "user_id": user_id,
+            }
+            
+            call = process_pixel_job.spawn(prompt, config, callback_url, metadata)
+            modal_job_id = call.object_id
+            
+            supabase.table("jobs").update({
+                "modal_job_id": modal_job_id
+            }).eq("id", job_id).execute()
             
             print(f"✅ Job submitted with ID: {job_id}")
             
@@ -202,7 +265,6 @@ def web_app():
                     "status": JobStatus.QUEUED
                 }
             )
-            
         except Exception as e:
             print(f"Error during job submission: {str(e)}")
             return JSONResponse(
@@ -224,12 +286,44 @@ def web_app():
             job_id = data.get("job_id")
             status = data.get("status")
             message = data.get("message")
-            
+            images = data.get("images", [])
+            error = data.get("error")
+            user_id = data.get("user_id")
+            prompt = data.get("prompt")
             print(f"📩 Received callback for job {job_id}: {status} - {message}")
             
-            # TODO:
-            # 1. Update the job status in your database
-            # 2. Nice to have: Handle other side effects (notifications, etc.)
+            from supabase import create_client
+            import datetime
+            
+            supabase = create_client(
+                supabase_url=os.environ["SUPABASE_URL"],
+                supabase_key=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+            )
+            
+            update_data = {
+                "status": status,
+                "message": message,
+                "updated_at": datetime.datetime.now().isoformat()
+            }
+            
+            if error:
+                update_data["error_message"] = error.get("message")
+                update_data["error_stage"] = error.get("stage")
+            
+            supabase.table("jobs").update(update_data).eq("id", job_id).execute()
+                        
+            if status == JobStatus.COMPLETED and images and len(images) > 0:
+                background_tasks = BackgroundTasks()
+                background_tasks.add_task(
+                    upload_svg, 
+                    supabase,
+                    job_id, 
+                    images[0], # MVP only handles a single image; refactor to handle multiple
+                    user_id,
+                    prompt
+                )
+                
+                return JSONResponse(content={"success": True}, background=background_tasks)
             
             return JSONResponse(content={"success": True})
         except Exception as e:
@@ -239,6 +333,48 @@ def web_app():
                 content={"detail": str(e)}
             )
     
+    async def upload_svg(supabase, job_id, image_data, user_id, prompt):
+        import aiohttp
+        
+        try:
+            svg_url = image_data.get("formats", {}).get("svg_url")
+            
+            if not svg_url:
+                print("❌ No SVG URL found in image data")
+                return
+            
+            async with aiohttp.ClientSession() as session:
+                async with session.get(svg_url) as response:
+                    if response.status != 200:
+                        print(f"❌ Failed to download SVG from {svg_url}: {response.status}")
+                        return
+                    
+                    svg_bytes = await response.read()
+
+            storage_path = f"{job_id}.svg"
+            storage_result = supabase.storage.from_("icons").upload(
+                storage_path,
+                svg_bytes,
+                {"content-type": "image/svg+xml"}
+            )
+            
+            result_path = storage_result.path
+
+            supabase.table("jobs").update({
+                "result_url": result_path
+            }).eq("id", job_id).execute()
+            
+            supabase.table("pixel").insert({
+                "prompt": prompt,
+                "job_id": job_id,
+                "user_id": user_id,
+                "file_path": result_path
+            }).execute()
+            
+            print(f"✅ Successfully uploaded SVG for job {job_id}")            
+        except Exception as e:
+            print(f"❌ Error uploading SVG: {str(e)}")
+            
     @api.get("/v1/pixel/job/{job_id}")
     async def get_job_result(job_id: str, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
         try:
@@ -251,37 +387,54 @@ def web_app():
             
             print(f"🔍 Checking status for job: {job_id}")
             
-            function_call = modal.FunctionCall.from_id(job_id)
+            from supabase import create_client
             
-            try:
-                result = function_call.get(timeout=0)
-                
-                return JSONResponse(
-                    content={
-                        "job_id": job_id,
-                        "status": JobStatus.COMPLETED,
-                        "result": result
-                    }
-                )
-            except modal.exception.OutputExpiredError:
+            supabase = create_client(
+                supabase_url=os.environ["SUPABASE_URL"],
+                supabase_key=os.environ["SUPABASE_SERVICE_ROLE_KEY"]
+            )
+            
+            response = supabase.table("jobs").select("*").eq("id", job_id).single().execute()
+            
+            if not response.data:
                 return JSONResponse(
                     status_code=404,
-                    content={
-                        "job_id": job_id, 
-                        "status": JobStatus.FAILED,
-                        "detail": "Job result has expired"
-                    }
+                    content={"detail": f"Job not found: {job_id}"}
                 )
-            except TimeoutError:
+            
+            job = response.data
+            
+            if job["status"] == JobStatus.COMPLETED:
                 return JSONResponse(
-                    status_code=202,
                     content={
                         "job_id": job_id,
-                        "status": JobStatus.INFERENCE,
-                        "detail": "Job is still processing"
+                        "status": job["status"],
+                        "result_url": job["result_url"],
+                        "message": job["message"]
+                    }
+                )
+            
+            if job["status"] == JobStatus.FAILED:
+                return JSONResponse(
+                    content={
+                        "job_id": job_id,
+                        "status": job["status"],
+                        "error": {
+                            "message": job["error_message"],
+                            "stage": job["error_stage"]
+                        },
+                        "message": job["message"]
                     }
                 )
                 
+            return JSONResponse(
+                status_code=202,
+                content={
+                    "job_id": job_id,
+                    "status": job["status"],
+                    "message": job["message"]
+                }
+            )            
         except Exception as e:
             print(f"Error checking job status: {str(e)}")
             return JSONResponse(
@@ -302,9 +455,9 @@ def web_app():
     timeout=60 * 60,
     memory=32768,
 )
-def process_pixel_job(prompt: str, config: dict, callback_url: str = None):
+def process_pixel_job(prompt: str, config: dict, callback_url: str = None, metadata: dict = None):
     model = PixelModel()
-    return model.process_job_queue.remote(prompt, config, callback_url)
+    return model.process_job_queue.remote(prompt, config, callback_url, metadata)
 
 @app.cls(
     gpu=gpu.H100(),
@@ -339,10 +492,6 @@ class PixelModel:
         if self.model_loading_initiated:
             return
         
-        # self.model_loaded = False
-        # self.pipelines = {}
-        # self.rembg_session = None
-        # self.recraft_api_url = RECRAFT_API_URL
         self.model_loading_initiated = True
         
         def load_models_thread():
@@ -395,7 +544,7 @@ class PixelModel:
                         print(traceback.format_exc())
                         raise
                 
-                self.rembg_session = new_session("u2net_human_seg")
+                self.rembg_session = new_session("silueta")
                 print("✅ Background removal model loaded")
 
                 self.model_loaded = True
@@ -430,15 +579,21 @@ class PixelModel:
             
             print("✅ Models finished loading and are ready to use")
             
-    def update_job_status(self, callback_url, job_id, status, message=None, images=None, error_details=None):
+    def update_job_status(self, callback_url, status, metadata, message=None, images=None, error_details=None):
         import os
         import requests
         
-        if not callback_url or not job_id:
+        if not callback_url or not metadata:
             return
             
+        job_id = metadata.get("job_id")
+        user_id = metadata.get("user_id")
+        prompt = metadata.get("prompt")
+        
         payload = {
             "job_id": job_id,
+            "user_id": user_id,
+            "prompt": prompt,
             "status": status
         }
         
@@ -532,17 +687,24 @@ class PixelModel:
         
         return {"url": data['image']['url']}
         
-    def process_job(self, text: str, config: InferenceConfig, job_id: str = None, callback_url: str = None):
+    def process_job(self, text: str, config: InferenceConfig, job_id: str, callback_url: str, user_id: str):
         import time
         import io
         import base64
+        
+        metadata = {
+            "prompt": text,
+            "job_id": job_id,
+            "user_id": user_id
+        }
+        
         try:
-            self.update_job_status(callback_url, job_id, JobStatus.INITIATED, "Starting job and preparing model")
+            self.update_job_status(callback_url, JobStatus.INITIATED, metadata, "Starting job and preparing model")
             
             start_time = time.time()
             
             # STAGE 1: INFERENCE
-            self.update_job_status(callback_url, job_id, JobStatus.INFERENCE, "Starting inference")
+            self.update_job_status(callback_url, JobStatus.INFERENCE, metadata, "Starting inference")
             images = self.inference(text, config)
             print(f"✅ Generated {len(images)} images")
             
@@ -563,8 +725,8 @@ class PixelModel:
                 try:
                     self.update_job_status(
                         callback_url, 
-                        job_id, 
                         JobStatus.BACKGROUND_REMOVAL, 
+                        metadata,
                         f"Removing background from image {idx+1}/{len(images)}"
                     )
                     
@@ -582,8 +744,8 @@ class PixelModel:
                     try:
                         self.update_job_status(
                             callback_url, 
-                            job_id, 
                             JobStatus.SVG_CONVERSION, 
+                            metadata,
                             f"Converting image {idx+1}/{len(images)} to SVG"
                         )
                         
@@ -611,8 +773,8 @@ class PixelModel:
             
             self.update_job_status(
                 callback_url, 
-                job_id, 
                 JobStatus.COMPLETED, 
+                metadata,
                 "Job completed successfully", 
                 processed_images
             )
@@ -644,9 +806,9 @@ class PixelModel:
             print(f"❌ Error in job processing at stage '{current_stage}': {e}\n{error_traceback}")
             
             self.update_job_status(
-                callback_url, 
-                job_id, 
+                callback_url,
                 JobStatus.FAILED, 
+                metadata,
                 f"Job failed during {current_stage}: {str(e)}",
                 error_details=error_details
             )
@@ -654,17 +816,25 @@ class PixelModel:
             raise
          
     @method()
-    def process_job_queue(self, prompt: str, config: dict, callback_url: str = None):
-        import time
-        
+    def process_job_queue(self, prompt: str, config: dict, callback_url: str = None, metadata: dict = None):        
         inference_config = InferenceConfig(**config)
-        
-        job_id = config.get("job_id", f"queue-{time.time()}")
         
         if config.get("is_warmup", False):
             print("🔥 Processing warm-up job")
             self.ensure_models_loaded()
             return {"status": "warmed_up"}
         
-        return self.process_job(prompt, inference_config, job_id, callback_url)
+        job_id = metadata.get("job_id")
+        user_id = metadata.get("user_id")
+        
+        if not user_id:
+            raise ValueError("User ID is required")
+        
+        if not job_id:
+            raise ValueError("Job ID is required")
+        
+        if not callback_url:
+            raise ValueError("Callback URL is required")
+        
+        return self.process_job(prompt, inference_config, job_id, callback_url, user_id)
     
