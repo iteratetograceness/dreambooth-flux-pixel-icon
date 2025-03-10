@@ -2,10 +2,9 @@ from modal import App, Image as ModalImage, Volume, Secret, gpu, asgi_app, enter
 from pydantic import BaseModel
 from enum import Enum
 
-NUM_INFERENCE_STEPS = 50
-GUIDANCE_SCALE = 7.5
+NUM_INFERENCE_STEPS = 60
+GUIDANCE_SCALE = 5
 NUM_OUTPUTS = 1
-SEED = None
 
 volume = Volume.from_name("dreambooth-flux")
 MODEL_DIR = "/dreambooth-flux"
@@ -23,6 +22,8 @@ recraft_api_key = Secret.from_name("recraft-api-key")
 supabase_url = Secret.from_name("supabase-url")
 supabase_service_role_key = Secret.from_name("supabase-service-role-key")
 supabase_jwt_secret = Secret.from_name("supabase-jwt-secret")
+bg_remover_model = Secret.from_name("bg-remover-model")
+replicate_api_token = Secret.from_name("replicate-api-token")
 
 class InputModel(BaseModel):
     prompt: str
@@ -33,8 +34,8 @@ class BodyModel(BaseModel):
     input: InputModel
 class InferenceConfig(BaseModel):
     style: str = DEFAULT_STYLE
-    num_inference_steps: int = 50
-    guidance_scale: float = 7.5
+    num_inference_steps: int = NUM_INFERENCE_STEPS
+    guidance_scale: float = GUIDANCE_SCALE
     num_outputs: int = 1
     seed: int | None = None
 class JobStatus(str, Enum):
@@ -73,8 +74,8 @@ image = (
         "pydantic>=2.0",
         "sentencepiece>=0.1.91,!=0.1.92",
         "pillow",
-        "rembg[gpu]",
         "requests",
+        "replicate",
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
@@ -237,12 +238,15 @@ def web_app():
             
             callback_url = f"{base_url}/v1/pixel/callback"
             
+            import random
+            seed = random.randint(0, 2**32 - 1)
+
             config = {
                 "style": body.input.style,
                 "num_inference_steps": NUM_INFERENCE_STEPS,
                 "guidance_scale": GUIDANCE_SCALE,
                 "num_outputs": NUM_OUTPUTS,
-                "seed": SEED,
+                "seed": seed,
             }
             
             metadata = {
@@ -365,7 +369,7 @@ def web_app():
             }).eq("id", job_id).execute()
             
             supabase.table("pixel").insert({
-                "prompt": prompt,
+                "prompt": prompt.replace("a PXCON, a 16-bit pixel art icon of ", ""),
                 "job_id": job_id,
                 "user_id": user_id,
                 "file_path": result_path
@@ -451,7 +455,7 @@ def web_app():
         MODEL_DIR: volume,
         "/cache": Volume.from_name("hf-hub-cache", create_if_missing=True),
     },
-    secrets=[huggingface_secret, auth_token, recraft_api_key],
+    secrets=[huggingface_secret, auth_token, recraft_api_key, bg_remover_model, replicate_api_token],
     timeout=60 * 60,
     memory=32768,
 )
@@ -466,7 +470,7 @@ def process_pixel_job(prompt: str, config: dict, callback_url: str = None, metad
         MODEL_DIR: volume,
         "/cache": Volume.from_name("hf-hub-cache", create_if_missing=True),
     },
-    secrets=[huggingface_secret, auth_token, recraft_api_key],
+    secrets=[huggingface_secret, auth_token, recraft_api_key, bg_remover_model, replicate_api_token],
     container_idle_timeout=1200,
     timeout=60 * 60,
     allow_concurrent_inputs=1,
@@ -477,7 +481,6 @@ class PixelModel:
     def __init__(self) -> None:
         self.model_loaded = False
         self.pipelines = {}
-        self.rembg_session = None
         self.recraft_api_url = "https://external.api.recraft.ai/v1/images/vectorize"
         self.model_loading_initiated = False
                  
@@ -487,7 +490,6 @@ class PixelModel:
     
     def start_model_loading_thread(self):
         import threading
-        from rembg import new_session
         
         if self.model_loading_initiated:
             return
@@ -544,9 +546,6 @@ class PixelModel:
                         print(traceback.format_exc())
                         raise
                 
-                self.rembg_session = new_session("silueta")
-                print("✅ Background removal model loaded")
-
                 self.model_loaded = True
                 print("✨ Model(s) loaded and optimized successfully!")
             except Exception as e:
@@ -645,18 +644,61 @@ class PixelModel:
 
         return images
 
-    def remove_background(self, image_data: bytes) -> bytes:
+    def remove_background(self, image_data: str) -> bytes:
+        import replicate
+        import requests
+        import os
+        from PIL import Image, ImageChops
         import io
-        from PIL import Image as PILImage
-        from rembg import remove
+        
+        PADDING = 60 
         
         self.ensure_models_loaded()
         
-        input_image = PILImage.open(io.BytesIO(image_data)).convert("RGBA")
-        output_image = remove(input_image, session=self.rembg_session)
-        output_buffer = io.BytesIO()
-        output_image.save(output_buffer, format="PNG")
-        return output_buffer.getvalue()
+        data_uri = f"data:image/png;base64,{image_data}"
+        
+        input = {
+            "image": data_uri,
+        }
+        
+        model = os.environ["BG_REMOVER_MODEL"]
+                
+        output = replicate.run(
+            model,
+            input=input
+        )
+        
+        response = requests.get(output)
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to remove background: {response.status_code}, {response.text}")
+        
+        try:
+            image = Image.open(io.BytesIO(response.content))
+            bg = Image.new(image.mode, image.size, image.getpixel((0, 0)))
+            diff = ImageChops.difference(image, bg)
+            diff = ImageChops.add(diff, diff)
+            bbox = diff.getbbox()
+            if bbox:
+                trimmed = image.crop(bbox)
+                new_size = (
+                    trimmed.size[0] + 2 * PADDING,
+                    trimmed.size[1] + 2 * PADDING
+                )
+                padded = Image.new('RGBA', new_size, (255, 255, 255, 0))
+                padded.paste(
+                    trimmed,
+                    (PADDING, PADDING),
+                    trimmed
+                )
+                buffer = io.BytesIO()
+                padded.save(buffer, format='PNG')
+                return buffer.getvalue()
+            else:
+                return response.content
+        except Exception as e:
+            print(f"⚠️ Post-processing failed: {str(e)}, returning original")
+            return response.content
     
     def convert_to_svg(self, image_data: bytes) -> dict:
         import os
@@ -701,6 +743,8 @@ class PixelModel:
         try:
             self.update_job_status(callback_url, JobStatus.INITIATED, metadata, "Starting job and preparing model")
             
+            self.ensure_models_loaded()
+            
             start_time = time.time()
             
             # STAGE 1: INFERENCE
@@ -731,7 +775,7 @@ class PixelModel:
                     )
                     
                     print(f"🔍 Removing background from image {idx+1}")
-                    bg_removed_bytes = self.remove_background(original_bytes)
+                    bg_removed_bytes = self.remove_background(result["formats"]["original"])
                     result["formats"]["transparent"] = base64.b64encode(bg_removed_bytes).decode('utf-8')
                     print("✅ Background removed")
                 except Exception as e:
@@ -771,12 +815,21 @@ class PixelModel:
             elapsed = time.time() - start_time
             print(f"⚡ Complete pipeline executed in {elapsed:.2f} seconds")
             
-            self.update_job_status(
-                callback_url, 
-                JobStatus.COMPLETED, 
-                metadata,
-                "Job completed successfully", 
-                processed_images
+            if result.get("errors"):
+                self.update_job_status(
+                    callback_url, 
+                    JobStatus.FAILED, 
+                    metadata,
+                    "Job failed", 
+                    error_details=result["errors"]
+                )
+            else:
+                self.update_job_status(
+                    callback_url, 
+                    JobStatus.COMPLETED, 
+                    metadata,
+                    "Job completed successfully", 
+                    processed_images
             )
             
             return {"images": processed_images}
