@@ -594,31 +594,30 @@ class PixelModel:
                     try:
                         print(f"🎯 Loading model for {style}...")
                         
+                        # Load model directly from graceyun/dotelier-color which has LoRA weights fused
+                        # This eliminates the need to load the base model and LoRA weights separately
                         pipeline = FluxPipeline.from_pretrained(
-                                "black-forest-labs/FLUX.1-dev", 
+                                "graceyun/dotelier-color",
                                 torch_dtype=torch.bfloat16,
                         )
-                        
+
                         pipeline.vae.enable_slicing()
                         pipeline.vae.enable_tiling()
                         pipeline.to('cuda')
-                        
-                        print("✅ Base model loaded")
-                                
-                        print(f"🎯 Loading LoRA weights")
-                        pipeline.load_lora_weights(config['dir'], weight_name='pytorch_lora_weights.safetensors')
-                        print("✅ LoRA weights applied")
-                        
-                        # Disabled for now because impact on performance was less than 1s:
-                        # print("⚡ Compiling transformer...")
-                        # try:
-                        #     pipeline.transformer = torch.compile(
-                        #         pipeline.transformer, 
-                        #         mode="max-autotune"
-                        #     )
-                        #     print("✅ Transformer compilation complete")
-                        # except Exception as e:
-                        #     print(f"⚠️ Compilation failed, falling back to uncompiled: {e}")
+
+                        print("✅ Fused model loaded from graceyun/dotelier-color")
+
+                        # Enable torch.compile for faster inference
+                        print("⚡ Compiling transformer for faster inference...")
+                        try:
+                            pipeline.transformer = torch.compile(
+                                pipeline.transformer,
+                                mode="max-autotune",
+                                fullgraph=True
+                            )
+                            print("✅ Transformer compilation complete")
+                        except Exception as e:
+                            print(f"⚠️ Compilation failed, falling back to uncompiled: {e}")
                         
                         self.pipelines[style] = pipeline
                         print(f"✨ LoRA weights loaded + compiled for {style}!")
