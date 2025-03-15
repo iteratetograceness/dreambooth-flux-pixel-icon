@@ -5,23 +5,29 @@ from enum import Enum
 NUM_INFERENCE_STEPS = 60
 GUIDANCE_SCALE = 5
 NUM_OUTPUTS = 1
+SUFFIX = ", 16-bit, on white background, only use up to 7 colors inclusive of #fff and #000, only use #fff for the background and #000 for black outline"
 
-volume = Volume.from_name("dreambooth-flux")
-MODEL_DIR = "/dreambooth-flux"
+def generate_prompt(token: str, prompt: str):
+    return f"a {token} style icon of: {prompt}{SUFFIX}"
+
+def extract_user_prompt(prompt: str):
+    return prompt.split("of:")[1].strip().replace(SUFFIX, '')
+
 STYLE_CONFIGS = {
     "color_v2": {
-        "dir": "lr_0.0002_steps_4200_rank_16",
-        "prompt_prefix": "a PXCON, a 16-bit pixel art icon of "
+        "dir": "graceyun/lr_0.0002_steps_4200_rank_16_031325",
+        "token": "PXCON",
+        "negative_prompt": 'text:"PXCON", text:"pxcon", logo',
     }
 }
 DEFAULT_STYLE = "color_v2"
 
 huggingface_secret = Secret.from_name("huggingface-secret")
 auth_token = Secret.from_name("pixel-auth-token")
-recraft_api_key = Secret.from_name("recraft-api-key")
 supabase_url = Secret.from_name("supabase-url")
 supabase_service_role_key = Secret.from_name("supabase-service-role-key")
 supabase_jwt_secret = Secret.from_name("supabase-jwt-secret")
+recraft_api_key = Secret.from_name("recraft-api-key")
 bg_remover_model = Secret.from_name("bg-remover-model")
 replicate_api_token = Secret.from_name("replicate-api-token")
 
@@ -38,12 +44,12 @@ class InferenceConfig(BaseModel):
     guidance_scale: float = GUIDANCE_SCALE
     num_outputs: int = 1
     seed: int | None = None
+    negative_prompt: str | None = None
 class JobStatus(str, Enum):
     QUEUED = 'queued'
     INITIATED = 'initiated'
     INFERENCE = 'inference'
-    BACKGROUND_REMOVAL = 'background_removal'
-    SVG_CONVERSION = 'svg_conversion'
+    POST_PROCESSING = 'post_processing'
     COMPLETED = 'completed'
     FAILED = 'failed'
 
@@ -53,8 +59,16 @@ api_image = (
         "fastapi[standard]",
         "pydantic>=2.0",
         "supabase",
-        "aiohttp",
         "pyjwt[crypto]",
+    )
+)
+
+pp_image = (
+    ModalImage.debian_slim(python_version="3.10")
+    .pip_install(
+        "requests",
+        "replicate",
+        "pillow",
     )
 )
 
@@ -73,9 +87,7 @@ image = (
         "fastapi[standard]",
         "pydantic>=2.0",
         "sentencepiece>=0.1.91,!=0.1.92",
-        "pillow",
-        "requests",
-        "replicate",
+        "torch",
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
@@ -89,7 +101,7 @@ app = App(name="pixel-api")
 @app.function(
     image=api_image,
     secrets=[auth_token, supabase_url, supabase_service_role_key, supabase_jwt_secret],
-    container_idle_timeout=300,
+    scaledown_window=300,
 )
 @asgi_app(label="pixel-api")
 def web_app():
@@ -217,8 +229,11 @@ def web_app():
                 )
             
             style = body.input.style
-            prefix = STYLE_CONFIGS[style]['prompt_prefix'] if style in STYLE_CONFIGS else ""
-            prompt = f"{prefix}{body.input.prompt}" if prefix else body.input.prompt
+            style_config = STYLE_CONFIGS[style]
+            token = style_config['token']
+            negative_prompt = style_config['negative_prompt']
+            user_prompt = body.input.prompt
+            prompt = generate_prompt(token, user_prompt)
             
             print(f"🔦 Submitting job for prompt: {prompt}")
             
@@ -247,6 +262,7 @@ def web_app():
                 "guidance_scale": GUIDANCE_SCALE,
                 "num_outputs": NUM_OUTPUTS,
                 "seed": seed,
+                "negative_prompt": negative_prompt,
             }
             
             metadata = {
@@ -294,6 +310,7 @@ def web_app():
             error = data.get("error")
             user_id = data.get("user_id")
             prompt = data.get("prompt")
+            
             print(f"📩 Received callback for job {job_id}: {status} - {message}")
             
             from supabase import create_client
@@ -337,25 +354,18 @@ def web_app():
                 content={"detail": str(e)}
             )
     
-    async def upload_svg(supabase, job_id, image_data, user_id, prompt):
-        import aiohttp
+    async def upload_svg(supabase, job_id, image_data, user_id, prompt):        
+        import base64
         
         try:
-            svg_url = image_data.get("formats", {}).get("svg_url")
+            svg_b64 = image_data.get("formats", {}).get("svg")
             
-            if not svg_url:
-                print("❌ No SVG URL found in image data")
+            if not svg_b64:
+                print("❌ No SVG found in image data")
                 return
-            
-            async with aiohttp.ClientSession() as session:
-                async with session.get(svg_url) as response:
-                    if response.status != 200:
-                        print(f"❌ Failed to download SVG from {svg_url}: {response.status}")
-                        return
-                    
-                    svg_bytes = await response.read()
 
             storage_path = f"{job_id}.svg"
+            svg_bytes = base64.b64decode(svg_b64)
             storage_result = supabase.storage.from_("icons").upload(
                 storage_path,
                 svg_bytes,
@@ -369,7 +379,7 @@ def web_app():
             }).eq("id", job_id).execute()
             
             supabase.table("pixel").insert({
-                "prompt": prompt.replace("a PXCON, a 16-bit pixel art icon of ", ""),
+                "prompt": extract_user_prompt(prompt),
                 "job_id": job_id,
                 "user_id": user_id,
                 "file_path": result_path
@@ -449,33 +459,108 @@ def web_app():
     return api
 
 @app.function(
-    gpu=gpu.H100(),
+    gpu="H100",
     image=image,
     volumes={
-        MODEL_DIR: volume,
         "/cache": Volume.from_name("hf-hub-cache", create_if_missing=True),
     },
     secrets=[huggingface_secret, auth_token, recraft_api_key, bg_remover_model, replicate_api_token],
-    timeout=60 * 60,
-    memory=32768,
+    timeout=10 * 60,
 )
 def process_pixel_job(prompt: str, config: dict, callback_url: str = None, metadata: dict = None):
     model = PixelModel()
     return model.process_job_queue.remote(prompt, config, callback_url, metadata)
 
+@app.function(
+    image=pp_image,
+    timeout=5 * 60,
+    secrets=[recraft_api_key, bg_remover_model, replicate_api_token],
+)
+def post_process_image(image_data: bytes):
+    def remove_background(image_data: str) -> bytes:
+        import replicate
+        import requests
+        import os
+        
+        data_uri = f"data:image/png;base64,{image_data}"
+        
+        input = {
+            "image": data_uri,
+        }
+        
+        model = os.environ["BG_REMOVER_MODEL"]
+                
+        output = replicate.run(
+            model,
+            input=input
+        )
+        
+        response = requests.get(output)
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to remove background: {response.status_code}, {response.text}")
+        
+        return response.content
+        
+    def convert_to_svg(image_data: bytes) -> dict:
+        import requests
+        from PIL import Image
+        import io
+        
+        image_buffer = io.BytesIO(image_data)
+        image = Image.open(image_buffer)
+        image = image.resize((image.width * 2, image.height * 2))
+        
+        output_buffer = io.BytesIO()
+        image.save(output_buffer, format='PNG')
+        output_buffer.seek(0)
+        
+        files = {
+            'file': ('image.png', image_data, 'image/png')
+        }
+        
+        data = {
+            'response_format': 'b64_json'
+        }
+
+        headers = {}
+        headers['Authorization'] = 'Bearer 6xdz0qUnWjwX262od2ZZru65iBkRnvnWHu8CG0Y8CPgBvSWWb7yXNgUP4wUN7hc1'
+        
+        response = requests.post(
+            "https://external.api.recraft.ai/v1/images/vectorize",
+            data=data,
+            files=files,
+            headers=headers,
+        )
+        
+        if response.status_code != 200:
+            raise Exception(f"Failed to convert to SVG: {response.status_code}, {response.text}")
+        
+        data = response.json()
+                
+        if not data or not data.get('image') or not data['image'].get('b64_json'):
+            raise Exception(f"Failed to convert to SVG: {data}")
+        
+        return data['image']['b64_json']
+
+    try:
+        removed_background = remove_background(image_data)
+        vectorize_result = convert_to_svg(removed_background)
+        
+        return vectorize_result
+    except Exception as e:
+        print(f"Error in post-processing: {str(e)}")
+        raise
+
 @app.cls(
-    gpu=gpu.H100(),
+    gpu="H100",
     image=image,
     volumes={
-        MODEL_DIR: volume,
         "/cache": Volume.from_name("hf-hub-cache", create_if_missing=True),
     },
-    secrets=[huggingface_secret, auth_token, recraft_api_key, bg_remover_model, replicate_api_token],
-    container_idle_timeout=1200,
-    timeout=60 * 60,
-    allow_concurrent_inputs=1,
-    concurrency_limit=5,
-    memory=32768,
+    secrets=[huggingface_secret, auth_token, supabase_url, supabase_service_role_key, recraft_api_key, bg_remover_model, replicate_api_token],
+    scaledown_window=5 * 60,
+    timeout=10 * 60,
 )
 class PixelModel:
     def __init__(self) -> None:
@@ -499,24 +584,29 @@ class PixelModel:
         def load_models_thread():
             try:
                 import torch 
-                from diffusers import AutoPipelineForText2Image
+                from diffusers import FluxPipeline
                 
-                print(f"🤗 Starting model load with CUDA: {torch.cuda.is_available()}")
+                print(f"🤗 Starting model load")
                                         
-                torch.set_grad_enabled(False)
                 torch.backends.cudnn.benchmark = True  
 
                 for style, config in STYLE_CONFIGS.items():
                     try:
                         print(f"🎯 Loading model for {style}...")
-                        pipeline = AutoPipelineForText2Image.from_pretrained(
+                        
+                        pipeline = FluxPipeline.from_pretrained(
                                 "black-forest-labs/FLUX.1-dev", 
                                 torch_dtype=torch.bfloat16,
-                        ).to('cuda')
+                        )
+                        
+                        pipeline.vae.enable_slicing()
+                        pipeline.vae.enable_tiling()
+                        pipeline.to('cuda')
+                        
                         print("✅ Base model loaded")
                                 
-                        dir = f"{MODEL_DIR}/{config['dir']}"
-                        pipeline.load_lora_weights(dir, weight_name='pytorch_lora_weights.safetensors')
+                        print(f"🎯 Loading LoRA weights")
+                        pipeline.load_lora_weights(config['dir'], weight_name='pytorch_lora_weights.safetensors')
                         print("✅ LoRA weights applied")
                         
                         # Disabled for now because impact on performance was less than 1s:
@@ -529,14 +619,6 @@ class PixelModel:
                         #     print("✅ Transformer compilation complete")
                         # except Exception as e:
                         #     print(f"⚠️ Compilation failed, falling back to uncompiled: {e}")
-                            
-                        print("🔥 Warming up model...")
-                        _ = pipeline(
-                            "warmup",
-                            num_inference_steps=1,
-                            num_images_per_prompt=1,
-                        )
-                        print("✅ Warm-up complete")
                         
                         self.pipelines[style] = pipeline
                         print(f"✨ LoRA weights loaded + compiled for {style}!")
@@ -565,7 +647,7 @@ class PixelModel:
         if not self.model_loaded:
             print("⏳ Waiting for models to finish loading...")
             max_wait_seconds = 300
-            wait_interval = 5
+            wait_interval = 10
             total_waited = 0
             
             while not self.model_loaded and total_waited < max_wait_seconds:
@@ -636,99 +718,15 @@ class PixelModel:
             text,
             num_inference_steps=config.num_inference_steps,
             guidance_scale=config.guidance_scale,
-            num_images_per_prompt=config.num_outputs
+            num_images_per_prompt=config.num_outputs,
+            negative_prompt=config.negative_prompt
         ).images        
         
         elapsed = time.time() - start_time
         print(f"⚡ Generation completed in {elapsed:.2f} seconds")
 
         return images
-
-    def remove_background(self, image_data: str) -> bytes:
-        import replicate
-        import requests
-        import os
-        from PIL import Image, ImageChops
-        import io
-        
-        PADDING = 60 
-        
-        self.ensure_models_loaded()
-        
-        data_uri = f"data:image/png;base64,{image_data}"
-        
-        input = {
-            "image": data_uri,
-        }
-        
-        model = os.environ["BG_REMOVER_MODEL"]
                 
-        output = replicate.run(
-            model,
-            input=input
-        )
-        
-        response = requests.get(output)
-        
-        if response.status_code != 200:
-            raise Exception(f"Failed to remove background: {response.status_code}, {response.text}")
-        
-        try:
-            image = Image.open(io.BytesIO(response.content))
-            bg = Image.new(image.mode, image.size, image.getpixel((0, 0)))
-            diff = ImageChops.difference(image, bg)
-            diff = ImageChops.add(diff, diff)
-            bbox = diff.getbbox()
-            if bbox:
-                trimmed = image.crop(bbox)
-                new_size = (
-                    trimmed.size[0] + 2 * PADDING,
-                    trimmed.size[1] + 2 * PADDING
-                )
-                padded = Image.new('RGBA', new_size, (255, 255, 255, 0))
-                padded.paste(
-                    trimmed,
-                    (PADDING, PADDING),
-                    trimmed
-                )
-                buffer = io.BytesIO()
-                padded.save(buffer, format='PNG')
-                return buffer.getvalue()
-            else:
-                return response.content
-        except Exception as e:
-            print(f"⚠️ Post-processing failed: {str(e)}, returning original")
-            return response.content
-    
-    def convert_to_svg(self, image_data: bytes) -> dict:
-        import os
-        import requests
-        
-        files = {
-            'file': ('image.png', image_data, 'image/png')
-        }
-        
-        headers = {}
-        headers['Authorization'] = f'Bearer {os.environ["RECRAFT_API_KEY"]}'
-        
-        response = requests.post(
-            self.recraft_api_url,
-            files=files,
-            headers=headers
-        )
-        
-        if response.status_code != 200:
-            print(f"SVG conversion failed: Status {response.status_code}, {response.text}")
-            return {"error": "VECTORIZATION_ERROR"}
-        
-        data = response.json()
-        
-        if not data or not data.get('image') or not data['image'].get('url'):
-            print(f"SVG conversion returned unexpected data structure: {data}")
-            return {"error": "VECTORIZATION_ERROR"}
-        
-        return {"url": data['image']['url']}
-        
     def process_job(self, text: str, config: InferenceConfig, job_id: str, callback_url: str, user_id: str):
         import time
         import io
@@ -759,61 +757,33 @@ class PixelModel:
                     "formats": {}
                 }
                                 
-                # Convert PIL image to bytes
                 with io.BytesIO() as buf:
                     image.save(buf, format="PNG")
                     original_bytes = buf.getvalue()
                     result["formats"]["original"] = base64.b64encode(original_bytes).decode('utf-8')
                 
-                # STAGE 2: BACKGROUND REMOVAL
+                # STAGE 2: POST-PROCESSING
                 try:
                     self.update_job_status(
                         callback_url, 
-                        JobStatus.BACKGROUND_REMOVAL, 
+                        JobStatus.POST_PROCESSING, 
                         metadata,
-                        f"Removing background from image {idx+1}/{len(images)}"
+                        f"Post-processing image {idx+1}/{len(images)}"
                     )
                     
-                    print(f"🔍 Removing background from image {idx+1}")
-                    bg_removed_bytes = self.remove_background(result["formats"]["original"])
-                    result["formats"]["transparent"] = base64.b64encode(bg_removed_bytes).decode('utf-8')
-                    print("✅ Background removed")
+                    post_processed_image = post_process_image.remote(result["formats"]["original"])
+                    
+                    result["formats"]["svg"] = post_processed_image
+                    print(f"✅ Converted to SVG")
                 except Exception as e:
-                    print(f"⚠️ Background removal failed: {e}")
+                    print(f"⚠️ Post-processing failed: {e}")
                     result["errors"] = result.get("errors", {})
-                    result["errors"]["post_processing"] = "Failed to post-process PNG: Background removal"
-                
-                # STAGE 3: SVG CONVERSION
-                if "transparent" in result["formats"]:
-                    try:
-                        self.update_job_status(
-                            callback_url, 
-                            JobStatus.SVG_CONVERSION, 
-                            metadata,
-                            f"Converting image {idx+1}/{len(images)} to SVG"
-                        )
-                        
-                        input_for_svg = bg_removed_bytes
-                            
-                        print(f"🔄 Converting image {idx+1} to SVG")
-                        vectorize_result = self.convert_to_svg(input_for_svg)
-                        
-                        if "error" in vectorize_result:
-                            print(f"⚠️ SVG conversion failed with error: {vectorize_result['error']}")
-                            result["errors"] = result.get("errors", {})
-                            result["errors"]["post_processing"] = "Failed to post-process PNG: SVG conversion"
-                        else:
-                            result["formats"]["svg_url"] = vectorize_result["url"]
-                            print(f"✅ Converted to SVG: {vectorize_result['url']}")
-                    except Exception as e:
-                        print(f"⚠️ SVG conversion failed: {e}")
-                        result["errors"] = result.get("errors", {})
-                        result["errors"]["post_processing"] = "Failed to post-process PNG: SVG conversion"
+                    result["errors"]["post_processing"] = "Failed to post-process icon"
                 
                 processed_images.append(result)
             
             elapsed = time.time() - start_time
-            print(f"⚡ Complete pipeline executed in {elapsed:.2f} seconds")
+            print(f"⚡⚡⚡ Complete pipeline executed in {elapsed:.2f} seconds")
             
             if result.get("errors"):
                 self.update_job_status(
@@ -844,10 +814,8 @@ class PixelModel:
                 current_stage = JobStatus.INITIATED
             elif "inference" in str(e).lower():
                 current_stage = JobStatus.INFERENCE
-            elif "background" in str(e).lower():
-                current_stage = JobStatus.BACKGROUND_REMOVAL
-            elif "svg" in str(e).lower():
-                current_stage = JobStatus.SVG_CONVERSION
+            elif "post-processing" in str(e).lower():
+                current_stage = JobStatus.POST_PROCESSING
             
             error_details = {
                 "message": str(e),

@@ -90,6 +90,21 @@ def delete_dsstore(path):
         if file.endswith('.DS_Store'):
             os.remove(os.path.join(path, file))
                                
+def reprocess_images(remove_pixels=70, final_size=(1024,1024)):
+    for file in os.listdir(dataset_path):
+        if file.endswith('.png'):
+            img = Image.open(os.path.join(dataset_path, file))
+            width, height = img.size
+            cropped_img = img.crop((
+                remove_pixels,          # left
+                remove_pixels,          # top
+                width - remove_pixels,  # right
+                height - remove_pixels  # bottom
+            ))
+            resized_img = cropped_img.resize(final_size, Image.LANCZOS)
+            output_path = os.path.join(dataset_path, "cropped", file)
+            resized_img.save(output_path)
+
 def update_to_huggingface():
     dataset = load_dataset("imagefolder", 
           data_dir=dataset_path, 
@@ -102,3 +117,4 @@ def update_to_huggingface():
     dataset.push_to_hub(dataset_name, private=True)
     print('\nDataset uploaded!')
     
+update_to_huggingface()

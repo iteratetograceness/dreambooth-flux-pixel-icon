@@ -5,9 +5,12 @@ from modal import App, Image, gpu, Secret, Volume, enter, method
 FOLDER_1 = "lr_1e-06_steps_4000_rank_8"
 FOLDER_2 = "lr_0.0002_steps_4000_rank_16"
 FOLDER_3 = "lr_0.0002_steps_4200_rank_16"
+FOLDER_4 = "lr_0.0002_steps_4200_rank_16_031325"
+
+ACTIVE_OUTPUT_DIR = FOLDER_4
 
 DATASET_1 = "graceyun/pixel-pngs-dreambooth" # 31 images
-DATASET_2 = "graceyun/dreambooth-pixels" # 42 images
+DATASET_2 = "graceyun/dreambooth-pixels" # 41 images
 
 app = App(name="dreambooth-flux")
 
@@ -45,17 +48,18 @@ class TrainConfig():
     model_name: str = "black-forest-labs/FLUX.1-dev"
     dataset_name: str = DATASET_2
     resolution: int = 512
-    train_batch_size: int = 42
+    train_batch_size: int = 41
     gradient_accumulation_steps: int = 1
     lr_scheduler: str = "constant"
     lr_warmup_steps: int = 0
     checkpointing_steps: int = 1000
     validation_prompt: str = "a PXCON, a 16-bit pixel art icon of a brown puppy, on a white background"
-    
+
+# SWEEP CONFIG CURRENTLY UNUSED
 @dataclass
 class SweepConfig():
     learning_rates = [2e-4] # 1e-6, 8e-5, 2e-4
-    train_steps = [4200] # [1000, 1500, 3000, 4000]
+    train_steps = [4100] # [1000, 1500, 3000, 4000]
     ranks = [16] # [4, 8, 16]
 
 def generate_sweep_configs(sweep_config: SweepConfig):
@@ -70,7 +74,7 @@ def generate_sweep_configs(sweep_config: SweepConfig):
             "learning_rate": lr,
             "max_train_steps": steps,
             "rank": rank,
-            "output_dir": f"{MODEL_DIR}/lr_{lr}_steps_{steps}_rank_{rank}",
+            "output_dir": f"{MODEL_DIR}/{ACTIVE_OUTPUT_DIR}",
         }
         for lr, steps, rank in param_combinations
     ]

@@ -1,0 +1,15 @@
+project_prompt = """
+This project is focused on fine-tuning and deploying Flux.DEV with a pixel art style LoRA weights. It uses Dreambooth finetuning to generate the weights.
+
+The app is deployed on Modal. The API itself uses FastAPI.
+
+The priority moving forward is to improve inference speed.
+
+The API is in api.py
+The training script is in diffusers_lora_finetune.py
+The data set pre-processing is in preprocess.py
+The training script is in training_script.py
+The model with fused LoRA weights is in fuse.py
+
+The training data set is on Hugging Face: https://huggingface.co/datasets/graceyun/dreambooth-pixels
+"""
