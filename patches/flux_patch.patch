@@ -1,0 +1,20 @@
+--- pipelines/flux/pipeline_flux.py	
++++ pipelines/flux/pipeline_flux.py
+@@ -834,7 +834,7 @@
+             )
+ 
+         # 4. Prepare latent variables
+-        num_channels_latents = self.transformer.config.in_channels // 4
++        num_channels_latents = 16
+         latents, latent_image_ids = self.prepare_latents(
+             batch_size * num_images_per_prompt,
+             num_channels_latents,
+@@ -867,7 +867,7 @@
+         self._num_timesteps = len(timesteps)
+ 
+         # handle guidance
+-        if self.transformer.config.guidance_embeds:
++        if (isinstance(self.transformer, torch.nn.Module) or isinstance(self.transformer, Callable)):
+             guidance = torch.full([1], guidance_scale, device=device, dtype=torch.float32)
+             guidance = guidance.expand(latents.shape[0])
+         else:
