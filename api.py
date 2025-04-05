@@ -327,7 +327,7 @@ class PixelModel:
             if not user_id:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "invalid Supabase token"},
+                    content={"detail": "invalid jwt token"},
                 )
                 
             result = self.inference(body)
