@@ -1,8 +1,8 @@
-from modal import App, Image as ModalImage, Volume, Secret, fastapi_endpoint, enter, Dict, parameter
+from modal import App, Image as ModalImage, Volume, Secret, enter, Dict, parameter, asgi_app, method
 from pydantic import BaseModel
 from typing import TypedDict
 from PIL import Image
-from ut import generate_presigned_url, with_retry
+import requests
 
 cuda_version = "12.4.0"
 flavor = "devel"
@@ -31,10 +31,7 @@ image = (
         "torch",
         "torchao",
         "para-attn",
-        "sqids",
         "numpy",
-        "PyJWT",
-        "cryptography"
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
@@ -44,7 +41,7 @@ image = (
     .add_local_python_source("ut")
 )
 
-app = App(name="pixel-api")
+app = App(name="dotelier-api")
 
 inference_config = Dict.from_name("dotelier-inference-config")
 styles = Dict.from_name("dotelier-styles")
@@ -53,8 +50,8 @@ http_config = Dict.from_name("dotelier-http-config")
 class InputModel(BaseModel):
     prompt: str
     num_outputs: int = inference_config["NUM_OUTPUTS"]
-    style: str = inference_config["DEFAULT_STYLE"]
     pixel_id: str
+    style: str = inference_config["DEFAULT_STYLE"]
 
 class InferenceConfig(InputModel):
     num_inference_steps: int = inference_config["NUM_INFERENCE_STEPS"]
@@ -78,39 +75,16 @@ class JWKSCache:
         return self.keys.get(kid)
     
     def refresh_keys(self):
-        response = requests.get(self.jwks_url)
+        response = requests.get(self.jwks_url, headers={"x-vercel-protection-bypass": http_config["VERCEL_AUTOMATION_BYPASS_SECRET"]})
         jwks = response.json()
         self.keys = {key['kid']: key for key in jwks['keys']}
 
 with image.imports():
-    # FastAPI
-    from fastapi import Response, HTTPException, status, Request, Depends
-    from fastapi.responses import JSONResponse
-    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
-
-    # ML/Processing imports
     import torch
     import pickle
     import gc
-        
-    # Uploads
-    import math
-    import hashlib
-    import hmac
-    from sqids import Sqids
-    from sqids.constants import DEFAULT_ALPHABET
-    from urllib.parse import urlencode
-    import requests
-    
-    # Other utilities
-    import os    
     import time
-    import io
-    import base64
-    import jwt
-    from jwt.algorithms import OKPAlgorithm
-    from PIL import Image
- 
+
 @app.cls(
     gpu="H100",
     image=image,
@@ -120,11 +94,7 @@ with image.imports():
         "/images": Volume.from_name("dotelier-sample-images"),
     },
     secrets=[
-        Secret.from_name("super-admin-user-id"),
         Secret.from_name("huggingface-secret"),
-        Secret.from_name("pixel-auth-token"),
-        Secret.from_name("uploadthing-secret"),
-        Secret.from_name("uploadthing-app-id"),
     ],
     scaledown_window=1200,
     timeout=60 * 60,
@@ -132,16 +102,13 @@ with image.imports():
 class PixelModel:
     dev: str = parameter(default="false")
     styles = styles
-    allowed_origins: list[str] = http_config["ALLOWED_ORIGINS"]
-    jwks_cache = JWKSCache("https://dotelier.studio/api/auth/jwks")
-        
-    auth_scheme = HTTPBearer()
+    is_dev: bool = False
                  
     @enter()
     def load_model(self):
-        self.dev = self.dev == "true"
+        self.is_dev = self.dev == "true"
         
-        if self.dev:
+        if self.is_dev:
             return
         
         try:
@@ -182,28 +149,132 @@ class PixelModel:
             print(traceback.format_exc())
             raise
     
-    def authorize(self, token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-        if self.dev:
-            return True
+    def generate_prompt(self, token: str, prompt: str, suffix: str = ''):
+        return f"a {token} style icon of: {prompt}{suffix}"
+     
+    @method()
+    def inference(self, input: InputModel) -> InferenceResult:    
+        if not self.is_dev and not self.pipeline:
+            print("weird, pipeline was not loaded")
+            self.load_model()
+            
+        style = input.style
+
+        if not style in self.styles:
+            raise ValueError(f"Unknown style: {style}")
+
+        style_config = self.styles[style]
+        token = style_config["token"]
+        suffix = style_config["suffix"]
+        negative_prompt = style_config["negative_prompt"]
+        
+        original_prompt = input.prompt
+        prompt = self.generate_prompt(token, original_prompt, suffix)
+        
+        config = InferenceConfig(
+            prompt=prompt,
+            num_outputs=input.num_outputs,
+            style=style,
+            negative_prompt=negative_prompt,
+            height=1024,
+            width=1024,
+            num_images_per_prompt=input.num_outputs,
+            pixel_id=input.pixel_id,
+        )
+        
+        if self.is_dev:
+            print(f"dev mode, returning test image")
+            image = Image.open("/images/test.png")
+            return InferenceResult(
+                    images=[image],
+                    inference_time=4.44,
+                )
+            
+        print(f"starting inference with prompt: {original_prompt}")
+        start_time = time.time()
+        
+        with torch.inference_mode():
+            images = self.pipeline(
+                prompt,
+                num_inference_steps=config.num_inference_steps,
+                guidance_scale=config.guidance_scale,
+                num_images_per_prompt=config.num_outputs,
+                negative_prompt=config.negative_prompt,
+                height=config.height,
+                width=config.width,
+            ).images
+            
+        elapsed = time.time() - start_time
+        print(f"completed in {elapsed:.2f} seconds")
+
+        return InferenceResult(
+            images=images,
+            inference_time=elapsed,
+        )
+
+web_image = ModalImage.debian_slim().pip_install(
+    "fastapi[standard]", 
+    "sqids", 
+    "PyJWT", 
+    "cryptography", 
+    "Pillow", 
+    "requests"
+    ).add_local_python_source("ut")
+
+@app.function(
+    image=web_image,
+    secrets=[
+        Secret.from_name("super-admin-user-id"),
+        Secret.from_name("huggingface-secret"),
+        Secret.from_name("pixel-auth-token"),
+        Secret.from_name("uploadthing-secret"),
+        Secret.from_name("uploadthing-app-id"),
+    ],
+)
+@asgi_app(label='dotelier-api')
+def fastapi_app():
+    from fastapi import FastAPI, Response, HTTPException, status, Request, Depends
+    from fastapi.responses import JSONResponse
+    from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
+    # import math
+    # import hashlib
+    # import hmac
+    # from sqids import Sqids
+    # from sqids.constants import DEFAULT_ALPHABET
+    # from urllib.parse import urlencode
+    import io
+    import os   
+    import requests
+    import base64
+    import jwt
+    from jwt.algorithms import OKPAlgorithm
+    from ut import generate_presigned_url, with_retry
+    
+    web_app = FastAPI()
+    
+    allowed_origins: list[str] = http_config["ALLOWED_ORIGINS"]
+    jwks_cache = JWKSCache("https://dotelier.studio/api/auth/jwks")
+        
+    auth_scheme = HTTPBearer()
+    
+    def authorize(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
         return token.credentials == os.environ["PIXEL_AUTH_TOKEN"]
     
-    def validate_origin(self, request: Request):
-        if self.dev:
-            return True
+    def validate_origin(request: Request):
         origin = request.headers.get("Origin")
-        return origin in self.allowed_origins
+        return origin in allowed_origins
     
-    def validate_jwt(self, token: str):
+    def validate_jwt(token: str):
         try:   
             headers = jwt.get_unverified_header(token)
             kid = headers['kid']
             
-            jwk = self.jwks_cache.get_key(kid)
+            jwk = jwks_cache.get_key(kid)
             if not jwk:
                 raise ValueError("no matching key found")   
             
             algorithm = OKPAlgorithm()
-            key = algorithm.from_jwk(jwk)  
+            key = algorithm.from_jwk(jwk)
             
             payload = jwt.decode(
                 token,
@@ -215,7 +286,6 @@ class PixelModel:
             )
             
             user_id = payload.get("id")
-            
             if not user_id:
                 raise ValueError("user id not found in token")
             
@@ -225,7 +295,6 @@ class PixelModel:
             return None
         
     def upload_thing(
-        self, 
         file_name: str, 
         file_size: int, 
         file_type: str = "image/png", 
@@ -256,54 +325,49 @@ class PixelModel:
             "url": file_url,
             "file_key": file_key
         }
-        
-    def generate_prompt(self, token: str, prompt: str, suffix: str = ''):
-        return f"a {token} style icon of: {prompt}{suffix}"
-    
-    @fastapi_endpoint(method="GET", docs=True, label="warmup")
-    def warmup(
-        self, 
-        request: Request,
-        token: HTTPAuthorizationCredentials = Depends(auth_scheme)
-    ):
-        try:
-            valid_origin = self.validate_origin(request.headers.get("Origin"))
-            
-            if not valid_origin:
-                print(f"invalid origin: {request.headers.get('Origin')}")
-                return JSONResponse(
-                    status_code=status.HTTP_403_FORBIDDEN,
-                    content={"detail": "forbidden"},
-                )
-                
-            authorized = self.authorize(token)
-            
-            if not authorized:
-                return JSONResponse(
-                    status_code=status.HTTP_401_UNAUTHORIZED,
-                    content={"detail": "unauthorized"},
-                    headers={"WWW-Authenticate": "Bearer"},
-                )
-            
-            return Response(
-                content="success",
-            )
-        except Exception as e:
-            print(f"[warmup] error: {str(e)}")
-            return JSONResponse(
-                    content={"detail": "unexpected error"},
-                    status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-                )               
 
-    @fastapi_endpoint(method="POST", docs=True, label="generate")
+    # @web_app.get("/warm")
+    # def warm(
+    #     request: Request,
+    #     token: HTTPAuthorizationCredentials = Depends(auth_scheme)
+    # ):
+    #     try:
+    #         valid_origin = validate_origin(request)
+            
+    #         if not valid_origin:
+    #             print(f"invalid origin: {request.headers.get('Origin')}")
+    #             return JSONResponse(
+    #                 status_code=status.HTTP_403_FORBIDDEN,
+    #                 content={"detail": "forbidden"},
+    #             )
+                
+    #         authorized = authorize(token)
+            
+    #         if not authorized:
+    #             return JSONResponse(
+    #                 status_code=status.HTTP_401_UNAUTHORIZED,
+    #                 content={"detail": "unauthorized"},
+    #                 headers={"WWW-Authenticate": "Bearer"},
+    #             )
+            
+    #         return Response(
+    #             content="success",
+    #         )
+    #     except Exception as e:
+    #         print(f"[warmup] error: {str(e)}")
+    #         return JSONResponse(
+    #                 content={"detail": "unexpected error"},
+    #                 status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+    #             )               
+
+    @web_app.post("/generate")
     def generate(
-        self,
         body: InputModel, 
         request: Request,
         token: HTTPAuthorizationCredentials = Depends(auth_scheme)
     ):      
         try:
-            valid_origin = self.validate_origin(request)
+            valid_origin = validate_origin(request)
             
             if not valid_origin:
                 print(f"invalid origin: {request.headers.get('Origin')}")
@@ -312,7 +376,7 @@ class PixelModel:
                     content={"detail": "Forbidden"},
                 )
             
-            authorized = self.authorize(token)
+            authorized = authorize(token)
             
             if not authorized:
                 return JSONResponse(
@@ -322,15 +386,16 @@ class PixelModel:
                 )
             
             auth_token = request.headers.get("X-Auth-JWT")
-            user_id = self.validate_jwt(auth_token)
+            user_id = validate_jwt(auth_token)
             
             if not user_id:
                 return JSONResponse(
                     status_code=status.HTTP_401_UNAUTHORIZED,
                     content={"detail": "invalid jwt token"},
                 )
-                
-            result = self.inference(body)
+            
+            model = PixelModel()
+            result = model.inference.remote(body)
             images = result["images"]
             elapsed = result["inference_time"]
             
@@ -345,7 +410,7 @@ class PixelModel:
                     file_name = f"{body.pixel_id}.png"
                     
                     upload_result = with_retry(
-                        lambda: self.upload_thing(
+                        lambda: upload_thing(
                             file_name=file_name,
                             file_size=len(image_bytes),
                             file_type="image/png",
@@ -374,61 +439,6 @@ class PixelModel:
                     content="unexpected error",
                     status_code=500,
                 )
-             
-    def inference(self, input: InputModel) -> InferenceResult:    
-        if not self.dev and not self.pipeline:
-            print("weird, pipeline was not loaded")
-            self.load_model()
-            
-        style = input.style
+     
 
-        if not style in self.styles:
-            raise ValueError(f"Unknown style: {style}")
-
-        style_config = self.styles[style]
-        token = style_config["token"]
-        suffix = style_config["suffix"]
-        negative_prompt = style_config["negative_prompt"]
-        
-        original_prompt = input.prompt
-        prompt = self.generate_prompt(token, original_prompt, suffix)
-        
-        config = InferenceConfig(
-            prompt=prompt,
-            num_outputs=input.num_outputs,
-            style=style,
-            negative_prompt=negative_prompt,
-            height=1024,
-            width=1024,
-            num_images_per_prompt=input.num_outputs,
-            pixel_id=input.pixel_id,
-        )
-        
-        if self.dev:
-            image = Image.open("/images/test.png")
-            return InferenceResult(
-                    images=[image],
-                    inference_time=4.44,
-                )
-            
-        print(f"starting inference with prompt: {original_prompt}")
-        start_time = time.time()
-        
-        with torch.inference_mode():
-            images = self.pipeline(
-                prompt,
-                num_inference_steps=config.num_inference_steps,
-                guidance_scale=config.guidance_scale,
-                num_images_per_prompt=config.num_outputs,
-                negative_prompt=config.negative_prompt,
-                height=config.height,
-                width=config.width,
-            ).images
-            
-        elapsed = time.time() - start_time
-        print(f"completed in {elapsed:.2f} seconds")
-
-        return InferenceResult(
-            images=images,
-            inference_time=elapsed,
-        )
+    return web_app

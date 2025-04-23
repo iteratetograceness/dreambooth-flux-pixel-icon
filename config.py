@@ -7,7 +7,7 @@ http_config = Dict.from_name("dotelier-http-config", create_if_missing=True)
 http_config_dev = Dict.from_name("dotelier-http-config-dev", create_if_missing=True)
 sample_images = Volume.from_name("dotelier-sample-images", create_if_missing=True)
 
-DEFAULT_STYLE = ""
+DEFAULT_STYLE = "color"
 NUM_INFERENCE_STEPS = 60
 GUIDANCE_SCALE = 5
 NUM_OUTPUTS = 1
@@ -22,12 +22,13 @@ ALLOWED_ORIGINS = [
 @app.function()
 def setup_config():
     # import os
-    # inference_config["DEFAULT_STYLE"] = DEFAULT_STYLE
+    inference_config["DEFAULT_STYLE"] = DEFAULT_STYLE
     # inference_config["NUM_INFERENCE_STEPS"] = NUM_INFERENCE_STEPS
     # inference_config["GUIDANCE_SCALE"] = GUIDANCE_SCALE
     # inference_config["NUM_OUTPUTS"] = NUM_OUTPUTS
-    # styles[""] = STYLE_CONFIGS[""]
-    http_config["ALLOWED_ORIGINS"] = ALLOWED_ORIGINS
+    # styles["color"] = STYLE_CONFIGS["color"]
+    # http_config["ALLOWED_ORIGINS"] = ALLOWED_ORIGINS
+    # http_config["VERCEL_AUTOMATION_BYPASS_SECRET"] = ""
     print("config setup complete")
 
 @app.local_entrypoint()
