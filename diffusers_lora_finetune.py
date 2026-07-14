@@ -1,13 +1,12 @@
 from dataclasses import dataclass
 import itertools
-from modal import App, Image, gpu, Secret, Volume, enter, method
+from modal import App, Image, Secret, Volume
 
-FOLDER_1 = "lr_1e-06_steps_4000_rank_8"
-FOLDER_2 = "lr_0.0002_steps_4000_rank_16"
-FOLDER_3 = "lr_0.0002_steps_4200_rank_16"
-FOLDER_4 = "lr_0.0002_steps_4200_rank_16_031325"
-
-ACTIVE_OUTPUT_DIR = FOLDER_4
+# Historical runs (kept for reference — the deployed model was fused from FOLDER_4):
+# FOLDER_1 = "lr_1e-06_steps_4000_rank_8"
+# FOLDER_2 = "lr_0.0002_steps_4000_rank_16"
+# FOLDER_3 = "lr_0.0002_steps_4200_rank_16"
+# FOLDER_4 = "lr_0.0002_steps_4200_rank_16_031325"  <- trained with train_batch_size=41 (full-batch)
 
 DATASET_1 = "graceyun/pixel-pngs-dreambooth" # 31 images
 DATASET_2 = "graceyun/dreambooth-pixels" # 41 images
@@ -48,19 +47,25 @@ class TrainConfig():
     model_name: str = "black-forest-labs/FLUX.1-dev"
     dataset_name: str = DATASET_2
     resolution: int = 512
-    train_batch_size: int = 41
+    # batch 4 on a 41-image set ≈ 10 steps/epoch. The previous batch_size=41
+    # (the entire dataset in one batch) made every step full-batch gradient
+    # descent — 4200 steps ≈ 4200 epochs, deep in overfit territory.
+    train_batch_size: int = 4
     gradient_accumulation_steps: int = 1
-    lr_scheduler: str = "constant"
-    lr_warmup_steps: int = 0
-    checkpointing_steps: int = 1000
+    lr_scheduler: str = "constant_with_warmup"
+    lr_warmup_steps: int = 100
+    # checkpoint often so eval.py can compare checkpoints and pick, instead of
+    # keeping only the final (possibly overtrained) weights
+    checkpointing_steps: int = 250
+    seed: int = 42
     validation_prompt: str = "a PXCON, a 16-bit pixel art icon of a brown puppy, on a white background"
+    validation_epochs: int = 25
 
-# SWEEP CONFIG CURRENTLY UNUSED
 @dataclass
 class SweepConfig():
-    learning_rates = [2e-4] # 1e-6, 8e-5, 2e-4
-    train_steps = [4100] # [1000, 1500, 3000, 4000]
-    ranks = [16] # [4, 8, 16]
+    learning_rates = [1e-4] # previous runs: 1e-6 (too low), 2e-4
+    train_steps = [1500] # ≈ 146 epochs at batch 4; eval checkpoints at 250-step intervals
+    ranks = [16]
 
 def generate_sweep_configs(sweep_config: SweepConfig):
     param_combinations = itertools.product(
@@ -69,12 +74,15 @@ def generate_sweep_configs(sweep_config: SweepConfig):
         sweep_config.ranks,
     )
 
+    batch_size = TrainConfig.train_batch_size
     return [
         {
             "learning_rate": lr,
             "max_train_steps": steps,
             "rank": rank,
-            "output_dir": f"{MODEL_DIR}/{ACTIVE_OUTPUT_DIR}",
+            # derive the folder from the actual params so names can't drift
+            # from reality (FOLDER_3/4 said steps_4200 while the sweep ran 4100)
+            "output_dir": f"{MODEL_DIR}/lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
         }
         for lr, steps, rank in param_combinations
     ]
@@ -94,7 +102,7 @@ image = image.env(
 
 @app.function(
     image=image,
-    gpu=gpu.H100(),
+    gpu="H100",
     volumes=VOLUME_CONFIG,
     timeout=24 * 60 * 60,
     secrets=[huggingface_secret, wandb_secret],
@@ -119,7 +127,7 @@ def train(config):
                 line_str = line.decode()
                 print(f"{line_str}", end="")
 
-        if exitcode := process.wait() != 0:
+        if (exitcode := process.wait()) != 0:
             raise subprocess.CalledProcessError(exitcode, "\n".join(cmd))
 
     print("Launching Dreambooth training script")
@@ -150,8 +158,10 @@ def train(config):
             f"--max_train_steps={max_train_steps}",
             f"--checkpointing_steps={train_config.checkpointing_steps}",
             f"--rank={rank}",
+            f"--seed={train_config.seed}",
             "--caption_column=text",
-            # f"--validation_prompt={train_config.validation_prompt}",
+            f"--validation_prompt={train_config.validation_prompt}",
+            f"--validation_epochs={train_config.validation_epochs}",
             "--report_to=wandb",
             "--push_to_hub",
             "--gradient_checkpointing",
