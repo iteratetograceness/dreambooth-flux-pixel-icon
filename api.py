@@ -69,12 +69,18 @@ class InferenceResult(TypedDict):
     inference_time: float
 
 class JWKSCache:
+    # re-fetch periodically so rotated/revoked signing keys stop validating
+    # even on long-lived warm containers
+    TTL_SECONDS = 15 * 60
+
     def __init__(self, jwks_url: str):
         self.jwks_url = jwks_url
         self.keys: Dict[str, dict] = {}
-        
+        self.fetched_at: float = 0.0
+
     def get_key(self, kid: str) -> dict:
-        if kid not in self.keys:
+        import time as _time
+        if kid not in self.keys or _time.monotonic() - self.fetched_at > self.TTL_SECONDS:
             self.refresh_keys()
         return self.keys.get(kid)
     
@@ -87,6 +93,8 @@ class JWKSCache:
         response.raise_for_status()
         jwks = response.json()
         self.keys = {key['kid']: key for key in jwks['keys']}
+        import time as _time
+        self.fetched_at = _time.monotonic()
 
 with image.imports():
     import torch

@@ -35,8 +35,15 @@ this environment):
       training-matched template.
 - [ ] Decide from the sheet: (a) does the train/inference prompt-template
       mismatch cost quality? (b) can steps drop from 60 → 28–40 (roughly
-      halving H100 latency/cost)? (c) is guidance 5.0 vs 3.5 helping or
-      cooking the outputs?
+      halving H100 latency/cost)? (c) guidance: the LoRA was trained with the
+      guidance **embedding at 3.5** (FLUX-dev is guidance-distilled and the
+      launcher never passed `--guidance_scale`) but prod serves at 5.0 — the
+      3.5 rows of the matrix are the on-distribution ones.
+- [ ] Extend eval.py with a `--prod-stack` mode replicating api.py's exact
+      serving stack (fuse_qkv + VAE autoquant + para-attn first-block cache)
+      plus a cache-threshold sweep (0.0 / 0.06 / 0.08 / 0.12) — pixel art is
+      worst-case content for residual caching and the current 0.12 threshold
+      has never been quality-checked against uncached output.
 
 ## Phase 2 — Retraining (config fixed in this branch; run needs Modal)
 
@@ -46,7 +53,16 @@ The previous run trained with `train_batch_size=41` on a 41-image dataset for
 steps (~146 epochs), rank 16, seed 42, checkpoints every 250 steps,
 validation prompts to wandb re-enabled.
 
+- [ ] **Re-process and re-upload the dataset first** (needs the original
+      source images, which live on your machine): the `size = img.size`
+      shadow bug (now fixed in preprocess.py) meant images were never
+      standardized to 512, so training bilinear-blurred the pixel grid.
+      While at it, consider raising `icon_scale` from 0.5 (icons occupy only
+      ~25% of every training frame — the model learns "small centered sprite
+      on white").
 - [ ] `modal run diffusers_lora_finetune.py` (~1 H100-hour class job).
+      Consider passing `--guidance_scale` explicitly to match the value you
+      intend to serve at (see Phase 1c).
 - [ ] Eval each checkpoint: `modal run eval.py --checkpoint-dir
       lr_0.0001_steps_1500_rank_16_bs_4/checkpoint-{250..1500}` and pick the
       best by contact sheet (style fidelity on in-domain rows, generalization
@@ -84,6 +100,20 @@ Still open (deliberate, needs decisions):
 - [ ] Origin-header check is advisory only (any non-browser client can set
       it); fine as CSRF defense-in-depth, but don't count it as auth. Consider
       per-user rate limiting keyed on the JWT `id`.
+- [ ] JWT claims: enforce `aud`/`iss` and require `exp` once the values your
+      auth server actually mints are known (currently any EdDSA token from the
+      JWKS with an `id` claim passes, and exp-less tokens never expire).
+- [ ] Drop unused secrets from `fastapi_app` (`huggingface-secret` — a
+      write-capable token that can push the prod model — and
+      `super-admin-user-id`) after confirming the deployed code doesn't use
+      them.
+- [ ] Set an explicit `timeout=` on `fastapi_app` (Modal default 300s is
+      shorter than a cold-start + 60-step generate + upload chain), or move to
+      spawn + poll.
+- [ ] Pin `revision=<hf commit>` in `from_pretrained("graceyun/dotelier-color")`
+      so a re-run of fuse.py (which still hardcodes the old overtrained LoRA)
+      can't silently swap prod weights; make fuse.py take its LoRA source as a
+      parameter.
 
 ## Phase 4 — Ops hygiene
 

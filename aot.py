@@ -273,32 +273,30 @@ def optimize_transformer(
         print("Unwrapping tensor subclasses...")
         unwrap_tensor_subclass(model)
         memory_cleanup()
-        
-        try:
-            print("AOT compiling...")
-            name = f"aot_transformer_0" # CHANGE NAME UPON EACH RUN
-            path = aot_compile(name, model, **inputs)
-            print(f"Compiled to: {path}")
-        except Exception as e:
-            print(f"Error during AOT compilation: {e}")
-            import traceback
-            print(traceback.format_exc())
-        finally:
-            memory_cleanup()
-        
+
+        # eager reference BEFORE compiling, so the post-compile numerical
+        # check has something to compare against
+        reference_outputs = validate_model(model, inputs, name="Eager model")
+        memory_cleanup()
+
+        print("AOT compiling...")
+        name = f"aot_transformer_0" # CHANGE NAME UPON EACH RUN
+        path = aot_compile(name, model, **inputs)
+        print(f"Compiled to: {path}")
+        memory_cleanup()
+
         print("Testing compiled model...")
         compiled_func = torch._inductor.aoti_load_package(path)
         compiled_outputs = validate_model(compiled_func, inputs, name="Compiled model")
         max_diff_compiled = (reference_outputs[0] - compiled_outputs[0]).abs().max().item()
         print(f"Max difference after compilation: {max_diff_compiled}")
-        
+
         if max_diff_compiled > 0.1:
             print(f"WARNING: Large difference after compilation: {max_diff_compiled}")
             print("This may result in poor image quality")
-        
+
         return {
             "compiled_path": path,
-            "max_diff_after_fusion": float(max_diff_fused),
             "max_diff_after_compilation": float(max_diff_compiled),
             "success": True
         }
@@ -324,9 +322,8 @@ def optimize_transformer(
         "/images": sample_image_volume,
         "/quant": Volume.from_name("quant-cache", create_if_missing=True),
     },
-    timeout=1800, 
-    allow_concurrent_inputs=5,
-    concurrency_limit=5
+    timeout=1800,
+    max_containers=5,
 )
 def test_inference(
     prompt: str = 'a PXCON style icon of a cow, 16-bit',
