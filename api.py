@@ -1,5 +1,5 @@
 from modal import App, Image as ModalImage, Volume, Secret, enter, Dict, parameter, asgi_app, method
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import TypedDict
 from PIL import Image
 import requests
@@ -47,15 +47,19 @@ inference_config = Dict.from_name("dotelier-inference-config")
 styles = Dict.from_name("dotelier-styles")
 http_config = Dict.from_name("dotelier-http-config")
 
+# NOTE: defaults that live in Modal Dicts are resolved at request time inside
+# PixelModel.inference — resolving them here (as class defaults) would read the
+# Dicts at import time, freezing values at deploy and breaking any import of
+# this module without Modal credentials / populated Dicts.
 class InputModel(BaseModel):
-    prompt: str
-    num_outputs: int = inference_config["NUM_OUTPUTS"]
-    pixel_id: str
-    style: str = inference_config["DEFAULT_STYLE"]
+    prompt: str = Field(min_length=1, max_length=500)
+    num_outputs: int | None = Field(default=None, ge=1, le=4)
+    pixel_id: str = Field(min_length=1, max_length=128)
+    style: str | None = None
 
 class InferenceConfig(InputModel):
-    num_inference_steps: int = inference_config["NUM_INFERENCE_STEPS"]
-    guidance_scale: float = inference_config["GUIDANCE_SCALE"]
+    num_inference_steps: int
+    guidance_scale: float
     negative_prompt: str | None = None
     height: int = 1024
     width: int = 1024
@@ -75,7 +79,12 @@ class JWKSCache:
         return self.keys.get(kid)
     
     def refresh_keys(self):
-        response = requests.get(self.jwks_url, headers={"x-vercel-protection-bypass": http_config["VERCEL_AUTOMATION_BYPASS_SECRET"]})
+        response = requests.get(
+            self.jwks_url,
+            headers={"x-vercel-protection-bypass": http_config["VERCEL_AUTOMATION_BYPASS_SECRET"]},
+            timeout=10,
+        )
+        response.raise_for_status()
         jwks = response.json()
         self.keys = {key['kid']: key for key in jwks['keys']}
 
@@ -153,12 +162,12 @@ class PixelModel:
         return f"a {token} style icon of: {prompt}{suffix}"
      
     @method()
-    def inference(self, input: InputModel) -> InferenceResult:    
-        if not self.is_dev and not self.pipeline:
+    def inference(self, input: InputModel) -> InferenceResult:
+        if not self.is_dev and getattr(self, "pipeline", None) is None:
             print("weird, pipeline was not loaded")
             self.load_model()
-            
-        style = input.style
+
+        style = input.style or inference_config["DEFAULT_STYLE"]
 
         if not style in self.styles:
             raise ValueError(f"Unknown style: {style}")
@@ -167,18 +176,19 @@ class PixelModel:
         token = style_config["token"]
         suffix = style_config["suffix"]
         negative_prompt = style_config["negative_prompt"]
-        
+
         original_prompt = input.prompt
         prompt = self.generate_prompt(token, original_prompt, suffix)
-        
+
         config = InferenceConfig(
             prompt=prompt,
-            num_outputs=input.num_outputs,
+            num_outputs=input.num_outputs or inference_config["NUM_OUTPUTS"],
             style=style,
             negative_prompt=negative_prompt,
+            num_inference_steps=inference_config["NUM_INFERENCE_STEPS"],
+            guidance_scale=inference_config["GUIDANCE_SCALE"],
             height=1024,
             width=1024,
-            num_images_per_prompt=input.num_outputs,
             pixel_id=input.pixel_id,
         )
         
@@ -242,8 +252,9 @@ def fastapi_app():
     # from sqids import Sqids
     # from sqids.constants import DEFAULT_ALPHABET
     # from urllib.parse import urlencode
+    import hmac
     import io
-    import os   
+    import os
     import requests
     import base64
     import jwt
@@ -258,7 +269,7 @@ def fastapi_app():
     auth_scheme = HTTPBearer()
     
     def authorize(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-        return token.credentials == os.environ["PIXEL_AUTH_TOKEN"]
+        return hmac.compare_digest(token.credentials, os.environ["PIXEL_AUTH_TOKEN"])
     
     def validate_origin(request: Request):
         origin = request.headers.get("Origin")
@@ -311,6 +322,7 @@ def fastapi_app():
         response = requests.put(
             presigned_data["url"],
             files={"file": file_bytes},
+            timeout=60,
         )
         
         if response.status_code != 200:
@@ -427,18 +439,14 @@ def fastapi_app():
             return JSONResponse(
                 content={"images": processed_images, "inference_time": elapsed},
             )
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"[generate] error: {str(e)}")
-            if isinstance(e, HTTPException):
-                return Response(
-                    content="unauthorized",
-                    status_code=401,
-                )
-            else:
-                return Response(
-                    content="unexpected error",
-                    status_code=500,
-                )
+            return Response(
+                content="unexpected error",
+                status_code=500,
+            )
      
 
     return web_app
