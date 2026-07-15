@@ -26,7 +26,10 @@ image = ModalImage.debian_slim(python_version="3.12").pip_install(
 eval_volume = Volume.from_name("dotelier-eval", create_if_missing=True)
 
 CANVAS = 512
-TARGET_FILL = 0.88  # linear fraction of canvas the icon's long side should reach
+# v2.0 used 0.88: icons edge-to-edge erased the white-margin evidence and the
+# model drifted to illustration backgrounds + overfit artifacts by step 1000.
+# 0.62 keeps real white margins (between v1's ~0.45 linear and v2.0's 0.88).
+TARGET_FILL = 0.62
 
 
 def _bbox(arr):

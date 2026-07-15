@@ -72,7 +72,8 @@ class TrainConfig():
 
 @dataclass
 class SweepConfig():
-    learning_rates = [1e-4] # previous runs: 1e-6 (too low), 2e-4
+    # 5e-5 added: the dsv2 run at 1e-4 showed overfit artifacts by step 1000
+    learning_rates = [1e-4, 5e-5] # previous runs: 1e-6 (too low), 2e-4
     train_steps = [1500] # ≈ 146 epochs at batch 4; eval checkpoints at 250-step intervals
     ranks = [16]
 
@@ -91,8 +92,8 @@ def generate_sweep_configs(sweep_config: SweepConfig):
             "rank": rank,
             # derive the folder from the actual params so names can't drift
             # from reality (FOLDER_3/4 said steps_4200 while the sweep ran 4100)
-            # dsv2 prefix: distinguishes dataset-v2 runs from the v1 run dirs
-            "output_dir": f"{MODEL_DIR}/dsv2_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
+            # dsv21 prefix: dataset v2.1 (62% fill) runs
+            "output_dir": f"{MODEL_DIR}/dsv21_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
         }
         for lr, steps, rank in param_combinations
     ]
@@ -188,8 +189,10 @@ def run():
     sweep_config = SweepConfig()
     configs = generate_sweep_configs(sweep_config)
     
-    for config in configs:
-        train.remote(config)
+    # spawn so sweep configs train on parallel GPUs instead of sequentially
+    handles = [train.spawn(config) for config in configs]
+    for h in handles:
+        h.get()
 
     print("🎨 Training finished")
     
