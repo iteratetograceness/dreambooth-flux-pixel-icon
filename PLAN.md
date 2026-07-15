@@ -35,8 +35,12 @@ Pipeline:
    (separate Modal app + endpoint label; NEVER overwrite the prod
    `dotelier-api` without explicit owner approval). Owner points the dotelier
    frontend at staging or hits it directly to compare.
+   → done 2026-07-15: `api_staging.py` serves
+   `graceyun/dotelier-pixel-v2-ckpt750` at 28 steps / guidance 3.5,
+   https://iteratetograceness--dotelier-api-staging.modal.run
 6. **Promotion** — on owner's "promote": swap `LORA_REPO` + settings in
-   api.py, deploy to prod, tag the release.
+   api.py (copy the values from api_staging.py, but keep prod's
+   buffer_containers/scaledown), deploy to prod, tag the release.
 
 Standing rules for runners: inventory volumes before any GPU work (never redo
 completed work), push results incrementally, no prod deploys, no fuse.py, no
@@ -52,6 +56,13 @@ PR #2 merged the review branch into it. Remaining:
       exactly (redeploy from `main` to be sure), and note that redeploying
       picks up the Round 2 fixes (torch pin, fused LoRA, secret scoping,
       timeout) — see REVIEW.md Round 2.
+      **2026-07-15 session finding:** prod is healthy (web tier answers,
+      auth enforced) but v31 was deployed 2026-02-09 from commit `2ce7277`
+      *with uncommitted changes* — that commit is not in this repo, so the
+      running prod code is NOT reproducible from git. Promotion of staging
+      would also fix this. Also: a redeploy from this branch would have
+      failed until now — the refreshed pins (numpy 2.5.1) require python
+      3.12 but the image added 3.11 (fixed on this branch).
 - [x] Config source of truth: now in `api.py` inline config. Still open:
       `config.py`'s stale constants disagree (60/5 vs 50/7.5) — delete or
       unify (R2-10).
@@ -66,26 +77,24 @@ PR #2 merged the review branch into it. Remaining:
       up to ~$9k/mo idle under steady light traffic. Confirm intentional or
       tune down.
 
-## Phase 1 — Fine-tune evaluation (needs Modal for GPU; harness is ready)
+## Phase 1 — Fine-tune evaluation — ✅ DONE (2026-07-15, see eval-results/)
 
-`eval.py` (new) generates a fixed 12-prompt suite with fixed seeds into the
-`dotelier-eval` volume with an HTML contact sheet per run.
+`eval.py` generates a fixed 12-prompt suite with fixed seeds into the
+`dotelier-eval` volume with an HTML contact sheet per run. The volume now
+holds runs for the old fused model, every new-run checkpoint (250–1500), and
+`eval_prod_reference` (exactly what prod serves today: old LoRA, 50 steps,
+guidance 7.5, train-match template). Curated downscaled sheets + grading are
+committed in `eval-results/SUMMARY.md`.
 
-- [ ] Baseline: `modal run eval.py` on the current fused model
-      (`graceyun/dotelier-color`) — includes prod settings (60 steps, guidance
-      5, deployed prompt template) vs cheaper settings and the
-      training-matched template.
-- [ ] Decide from the sheet: (a) does the train/inference prompt-template
-      mismatch cost quality? (b) can steps drop from 60 → 28–40 (roughly
-      halving H100 latency/cost)? (c) guidance: the LoRA was trained with the
-      guidance **embedding at 3.5** (FLUX-dev is guidance-distilled and the
-      launcher never passed `--guidance_scale`) but prod serves at 5.0 — the
-      3.5 rows of the matrix are the on-distribution ones.
-- [ ] Extend eval.py with a `--prod-stack` mode replicating api.py's exact
-      serving stack (fuse_qkv + VAE autoquant + para-attn first-block cache)
-      plus a cache-threshold sweep (0.0 / 0.06 / 0.08 / 0.12) — pixel art is
-      worst-case content for residual caching and the current 0.12 threshold
-      has never been quality-checked against uncached output.
+- [x] Baseline on the old fused model (`graceyun/dotelier-color`).
+- [x] Decisions from the sheets: (a) template — the new checkpoints only
+      produce pixel art with the training-matched template (legacy template
+      yields smooth vector icons); api.py already uses train-match. (b) steps
+      28 ≈ 40 ≈ 60 visually; 28 halves latency (~5.2–5.9s vs ~11.2–12.7s per
+      1024px image on H100). (c) guidance 3.5 (on-distribution) is the pick.
+- [ ] `--prod-stack` mode (fuse_qkv + autoquant + para-attn cache sweep) —
+      dropped for now: the "boop" rewrite removed torchao/para-attn from
+      serving, so bare pipeline + fuse_lora IS the prod stack today.
 
 ## Phase 2 — Retraining (config fixed in this branch; run needs Modal)
 
@@ -95,25 +104,19 @@ The previous run trained with `train_batch_size=41` on a 41-image dataset for
 steps (~146 epochs), rank 16, seed 42, checkpoints every 250 steps,
 validation prompts to wandb re-enabled.
 
-- [ ] **Re-process and re-upload the dataset first** (needs the original
-      source images, which live on your machine): the `size = img.size`
-      shadow bug (now fixed in preprocess.py) meant images were never
-      standardized to 512, so training bilinear-blurred the pixel grid.
-      While at it, consider raising `icon_scale` from 0.5 (icons occupy only
-      ~25% of every training frame — the model learns "small centered sprite
-      on white").
-- [ ] `modal run diffusers_lora_finetune.py` (~1 H100-hour class job).
-      Consider passing `--guidance_scale` explicitly to match the value you
-      intend to serve at (see Phase 1c).
-- [ ] Eval each checkpoint: `modal run eval.py --checkpoint-dir
-      lr_0.0001_steps_1500_rank_16_bs_4/checkpoint-{250..1500}` and pick the
-      best by contact sheet (style fidelity on in-domain rows, generalization
-      on novel-object rows, no dataset regurgitation).
-- [ ] If the winning checkpoint beats prod: update `fuse.py` to point at it,
-      fuse, re-run Phase 1 eval on the fused output (fusing + autoquant +
-      first-block-cache can shift quality), then swap the serving repo.
-- [ ] Dataset follow-ups (optional, next round): captions audit, higher-res
-      training (512 → 768/1024 to match 1024 serving), more diverse subjects.
+- [x] Training run done: checkpoints on the `dreambooth-flux` volume under
+      `lr_0.0001_steps_1500_rank_16_bs_4/` (final also pushed to hub).
+- [x] Eval of every checkpoint (250–1500) — **checkpoint-750 wins**: style
+      locked in, best generalization; 1000+ overfit (rocket → creature,
+      snail → blob), 250 still blurry, 500 fails "macintosh computer".
+      Details in `eval-results/SUMMARY.md`.
+- [x] Winning LoRA published to a private HF repo:
+      `graceyun/dotelier-pixel-v2-ckpt750` (`upload_lora.py`). No fuse.py —
+      serving fuses at startup (`fuse_lora()`), same as prod.
+- [ ] Dataset v2 follow-ups (optional, next round): margin crop + NEAREST
+      512 re-process (`graceyun/dreambooth-pixels` → `-v2`), captions audit,
+      higher-res training, more diverse subjects. Known v1 regression worth
+      targeting: "cup of coffee" renders handle-less on all new checkpoints.
 
 ## Phase 3 — API hardening (done in this branch; deploy after Phase 0)
 
@@ -130,15 +133,14 @@ Fixed in `api.py`:
   `AttributeError`.
 
 Still open (deliberate, needs decisions):
-- [ ] Prompt template mismatch: api builds `"a {token} style icon of: X"`,
-      training used `"a {token}, a 16-bit pixel art icon of X"`. Decide from
-      Phase 1 eval, then update `generate_prompt` (or move the template into
-      the style Dict so it ships with the style).
+- [x] Prompt template mismatch: resolved — api.py already serves the
+      training-matched template, and Phase 1 eval confirmed it's mandatory
+      for the new checkpoints (legacy template produces non-pixel output).
 - [ ] `negative_prompt` is passed to `FluxPipeline` but FLUX.1-dev distilled
       guidance ignores it unless `true_cfg_scale > 1` (which doubles compute).
       Either drop it or consciously enable true CFG.
-- [ ] Pin versions in the inference image (`diffusers`, `torch`, `torchao`,
-      `para-attn`) — today a redeploy silently picks up whatever is latest.
+- [x] Pin versions in the inference image — done (exact pins, python 3.12;
+      torchao/para-attn no longer in the stack).
 - [ ] Origin-header check is advisory only (any non-browser client can set
       it); fine as CSRF defense-in-depth, but don't count it as auth. Consider
       per-user rate limiting keyed on the JWT `id`.
