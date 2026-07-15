@@ -10,8 +10,10 @@ flavor = "devel"
 operating_sys = "ubuntu22.04"
 tag = f"{cuda_version}-{flavor}-{operating_sys}"
 
+# python 3.12: the pinned stack (numpy 2.5.1) requires >=3.12, and the eval
+# runs that validated these pins ran on 3.12 (image build fails on 3.11)
 cuda_dev_image = ModalImage.from_registry(
-    f"nvidia/cuda:{tag}", add_python="3.11"
+    f"nvidia/cuda:{tag}", add_python="3.12"
 ).entrypoint([])
 
 # Pre-download model weights at image build time so they're baked into the
