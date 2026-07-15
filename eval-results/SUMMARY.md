@@ -56,3 +56,13 @@ monotonically with steps, novel-subject semantics peak at 750 then decay.
 - `03_settings_matrix_ckpt_500_750_1000.png` — legacy vs train template, 28 vs 40
 - `04_old_model_settings.png` — old fused model settings sweep
 - `make_sheets.py` — rebuilds the sheets from a local copy of the volume
+
+## Prod vs staging (added after the staging candidate was chosen)
+
+`05_prod_vs_staging.png` — what prod serves today (old LoRA, 50 steps,
+guidance 7.5, train-match template; from run `eval_prod_reference`) against
+the staging candidate (ckpt-750, 28 steps, guidance 3.5), same prompts, seed
+42, ~2.2x faster per image. Staging is crisper pixel art on 9/12 rows and
+fixes two outright prod failures ("a snail on a leaf" renders as a flower in
+prod; rocket sits on a blue blob). Prod is still better on the coffee cup
+(handle) and arguably the lighthouse.
