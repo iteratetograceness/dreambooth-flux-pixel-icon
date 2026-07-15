@@ -74,3 +74,26 @@ deployed `dotelier-api-staging` container (B200, torch 2.13/CUDA 13 stack):
 **3.07s** for 28 steps at 1024px (~9.5 it/s), no kernel issues, clean pixel
 grid, white background. Staging endpoint answers with prod-identical auth
 behavior (404 /, 401 unauthenticated /generate).
+
+## Hill-climb round A: guidance sweep (2026-07-15, after owner preferred prod)
+
+`06_guidance_sweep.png` — the v1-data checkpoints served at guidance 5.0/7.5
+instead of 3.5. Higher guidance recovers much of prod's polish: saturated
+colors, confident outlines, and ckpt-750 at g7.5 even draws the coffee cup
+with handle + saucer. Trade-offs: night-scene backgrounds flood blue again
+and a few rows (puppy, guitar) go soft/painterly at 7.5. Conclusion: the
+dull/mushy look was partly a serving-guidance artifact, partly the v1
+dataset's anti-aliased edges. The v2-dataset retrain should be evaluated at
+g3.5 AND g5.0/7.5.
+
+## Hill-climb diagnosis: the dataset (dataset_audit.py, dataset_v2.py)
+
+- `graceyun/pixel-pngs-dreambooth` (31 imgs, 512px): pristine pixel art
+  (5–33 unique colors) but icons fill only ~11–25% of frame.
+- `graceyun/dreambooth-pixels` (41 imgs, 1024px, used by the v1 retrain):
+  bigger icons, better captions, but many images carry anti-aliased edges
+  (hundreds to thousands of unique colors) — the fine-tune learned the mush.
+- `graceyun/dreambooth-pixels-v2` (pushed private): all 41 subjects rebuilt —
+  pristine pixels where available (30/41), logical-grid re-snap via
+  run-length cell detection, integer NEAREST upscale to ~60–85% frame fill,
+  clean white 512 canvas, captions carried over.
