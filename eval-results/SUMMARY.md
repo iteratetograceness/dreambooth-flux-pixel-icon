@@ -66,3 +66,11 @@ the staging candidate (ckpt-750, 28 steps, guidance 3.5), same prompts, seed
 fixes two outright prod failures ("a snail on a leaf" renders as a flower in
 prod; rocket sits on a blue blob). Prod is still better on the coffee cup
 (handle) and arguably the lighthouse.
+
+## Staging smoke test (2026-07-15)
+
+`staging_smoke.png` — "a cactus in a terracotta pot" generated through the
+deployed `dotelier-api-staging` container (B200, torch 2.13/CUDA 13 stack):
+**3.07s** for 28 steps at 1024px (~9.5 it/s), no kernel issues, clean pixel
+grid, white background. Staging endpoint answers with prod-identical auth
+behavior (404 /, 401 unauthenticated /generate).
