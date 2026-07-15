@@ -62,13 +62,18 @@ PROMPT_SUITE = [
     "a snail on a leaf",
 ]
 
-# "train_match" mirrors the training captions ("a PXCON, a 16-bit pixel art
-# icon of X"); "deployed" mirrors api.py's generate_prompt. Comparing the two
-# quantifies how much the current train/inference prompt mismatch costs.
+# "prod" mirrors api.py's current generate_prompt (training-matched, no
+# suffix); "white_bg" adds the background phrase most training captions
+# carried; "legacy" is the old serving template kept for reference.
 TEMPLATES = {
-    "train_match": "a {token}, a 16-bit pixel art icon of {prompt}, on a white background",
-    "deployed": "a {token} style icon of: {prompt}",
+    "prod": "a {token}, a 16-bit pixel art icon of {prompt}",
+    "white_bg": "a {token}, a 16-bit pixel art icon of {prompt}, on a white background",
+    "legacy": "a {token} style icon of: {prompt}",
 }
+
+# what production actually serves today (api.py): base FLUX.1-dev + this LoRA,
+# loaded unfused, 50 steps, guidance 7.5
+PROD_LORA_REPO = "graceyun/lr_0.0002_steps_4200_rank_16_031325"
 
 DEFAULT_SEED = 42
 TOKEN = "PXCON"
@@ -201,17 +206,19 @@ def _write_contact_sheet(out_root: str, results: list, configs: list, run_name: 
 @app.local_entrypoint()
 def main(
     run_name: str = "",
-    model_repo: str = "graceyun/dotelier-color",
-    lora_repo: str = "",
+    model_repo: str = "black-forest-labs/FLUX.1-dev",
+    lora_repo: str = PROD_LORA_REPO,
     checkpoint_dir: str = "",
 ):
-    # Default matrix: current prod settings (60 steps / guidance 5 / deployed
-    # template) against the training-matched template and cheaper step counts.
+    # Default matrix: what prod serves today (50 steps / guidance 7.5 / prod
+    # template on base+unfused LoRA) vs the guidance the LoRA was actually
+    # trained at (3.5, via the training script's default guidance embedding)
+    # and cheaper step counts.
     configs = [
-        {"steps": 60, "guidance": 5.0, "template": "deployed"},     # prod today
-        {"steps": 28, "guidance": 3.5, "template": "deployed"},     # cheap baseline
-        {"steps": 28, "guidance": 3.5, "template": "train_match"},
-        {"steps": 40, "guidance": 3.5, "template": "train_match"},
+        {"steps": 50, "guidance": 7.5, "template": "prod"},      # prod today
+        {"steps": 50, "guidance": 3.5, "template": "prod"},      # on-distribution guidance
+        {"steps": 28, "guidance": 3.5, "template": "prod"},      # cheap
+        {"steps": 50, "guidance": 3.5, "template": "white_bg"},
     ]
 
     if not run_name:
