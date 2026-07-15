@@ -9,8 +9,10 @@ dataset_name = "graceyun/dreambooth-pixels"
 def process_image(input_path, size=(512,512), icon_scale=0.5):
     try:
         img = Image.open(input_path)
-        size = img.size
-        
+        # NOTE: do not overwrite `size` with img.size here — that bug meant
+        # images were never standardized to 512 and training bilinear-resized
+        # them (blurring the pixel grid)
+
         # Handle transparency
         if img.mode in ('RGBA', 'LA'):
             background = Image.new('RGBA', img.size, (255, 255, 255, 255))
@@ -27,8 +29,11 @@ def process_image(input_path, size=(512,512), icon_scale=0.5):
         y = (size[1] - img.height) // 2
         new_img.paste(img, (x, y))
         
-        # Save as PNG
-        output_path = input_path.with_suffix('.png')
+        # Save as PNG into a separate directory — overwriting the source in
+        # place made re-runs re-shrink already-composited icons (50% -> 25% -> ...)
+        output_dir = input_path.parent / "processed"
+        output_dir.mkdir(exist_ok=True)
+        output_path = output_dir / input_path.with_suffix('.png').name
         new_img.save(output_path, 'PNG')
             
         print(f"Processed: {input_path} -> {output_path}")
@@ -116,5 +121,6 @@ def update_to_huggingface():
     print("\nDataset loaded!")
     dataset.push_to_hub(dataset_name, private=True)
     print('\nDataset uploaded!')
-    
-update_to_huggingface()
+
+if __name__ == "__main__":
+    update_to_huggingface()

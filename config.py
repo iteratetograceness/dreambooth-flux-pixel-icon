@@ -25,8 +25,10 @@ ALLOWED_ORIGINS = [
     "http://127.0.0.1:3000",
 ]
 
-# Get secret from environment variable or use default
-VERCEL_AUTOMATION_BYPASS_SECRET = os.getenv("VERCEL_AUTOMATION_BYPASS_SECRET", "ilovecooperandlouieandjoosungkim")
+# Secret comes from the environment (Modal Secret "vercel-automation-bypass").
+# Never hardcode a fallback here — the previous default is in git history and
+# must be rotated in Vercel.
+VERCEL_AUTOMATION_BYPASS_SECRET = os.getenv("VERCEL_AUTOMATION_BYPASS_SECRET")
 
 # Configuration class for easy access
 class Config:
@@ -48,7 +50,7 @@ def get_config():
         "NUM_OUTPUTS": NUM_OUTPUTS,
         "STYLE_CONFIGS": STYLE_CONFIGS,
         "ALLOWED_ORIGINS": ALLOWED_ORIGINS,
-        "VERCEL_AUTOMATION_BYPASS_SECRET": VERCEL_AUTOMATION_BYPASS_SECRET,
+        # secret deliberately not returned here
     }
 
 @app.local_entrypoint()

@@ -1,5 +1,5 @@
 from modal import App, Image as ModalImage, Volume, Secret, enter, Dict, parameter, asgi_app, method
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from typing import TypedDict
 from PIL import Image
 import requests
@@ -95,9 +95,9 @@ config = {
 }
 
 class InputModel(BaseModel):
-    prompt: str
-    num_outputs: int = config["num_outputs"]
-    pixel_id: str
+    prompt: str = Field(min_length=1, max_length=500)
+    num_outputs: int = Field(default=config["num_outputs"], ge=1, le=4)
+    pixel_id: str = Field(min_length=1, max_length=128)
     style: str = config["default_style"]
 
 class InferenceConfig(InputModel):
@@ -112,19 +112,32 @@ class InferenceResult(TypedDict):
     inference_time: float
 
 class JWKSCache:
+    # re-fetch periodically so rotated/revoked signing keys stop validating
+    # even on long-lived warm containers
+    TTL_SECONDS = 15 * 60
+
     def __init__(self, jwks_url: str):
         self.jwks_url = jwks_url
         self.keys: Dict[str, dict] = {}
-        
+        self.fetched_at: float = 0.0
+
     def get_key(self, kid: str) -> dict:
-        if kid not in self.keys:
+        import time as _time
+        if kid not in self.keys or _time.monotonic() - self.fetched_at > self.TTL_SECONDS:
             self.refresh_keys()
         return self.keys.get(kid)
     
     def refresh_keys(self):
-        response = requests.get(self.jwks_url, headers={"x-vercel-protection-bypass": os.environ["VERCEL_AUTOMATION_BYPASS_SECRET"]})
+        response = requests.get(
+            self.jwks_url,
+            headers={"x-vercel-protection-bypass": os.environ["VERCEL_AUTOMATION_BYPASS_SECRET"]},
+            timeout=10,
+        )
+        response.raise_for_status()
         jwks = response.json()
         self.keys = {key['kid']: key for key in jwks['keys']}
+        import time as _time
+        self.fetched_at = _time.monotonic()
 
 with image.imports():
     import torch
@@ -207,11 +220,11 @@ class PixelModel:
         return f"a PXCON, a 16-bit pixel art icon of {prompt}"
      
     @method()
-    def inference(self, input: InputModel) -> InferenceResult:    
-        if not self.is_dev and not self.pipeline:
+    def inference(self, input: InputModel) -> InferenceResult:
+        if not self.is_dev and getattr(self, "pipeline", None) is None:
             print("weird, pipeline was not loaded")
             self.load_model()
-            
+
         style = input.style
 
         if not style in self.styles:
@@ -219,7 +232,7 @@ class PixelModel:
 
         original_prompt = input.prompt
         prompt = self.generate_prompt(original_prompt)
-        
+
         config = InferenceConfig(
             prompt=prompt,
             num_outputs=input.num_outputs,
@@ -293,8 +306,9 @@ def fastapi_app():
     # from sqids import Sqids
     # from sqids.constants import DEFAULT_ALPHABET
     # from urllib.parse import urlencode
+    import hmac
     import io
-    import os   
+    import os
     import requests
     import base64
     import jwt
@@ -309,7 +323,7 @@ def fastapi_app():
     auth_scheme = HTTPBearer()
     
     def authorize(token: HTTPAuthorizationCredentials = Depends(auth_scheme)):
-        return token.credentials == os.environ["PIXEL_AUTH_TOKEN"]
+        return hmac.compare_digest(token.credentials, os.environ["PIXEL_AUTH_TOKEN"])
     
     def validate_origin(request: Request):
         origin = request.headers.get("Origin")
@@ -362,6 +376,7 @@ def fastapi_app():
         response = requests.put(
             presigned_data["url"],
             files={"file": file_bytes},
+            timeout=60,
         )
         
         if response.status_code != 200:
@@ -478,18 +493,14 @@ def fastapi_app():
             return JSONResponse(
                 content={"images": processed_images, "inference_time": elapsed},
             )
+        except HTTPException:
+            raise
         except Exception as e:
             print(f"[generate] error: {str(e)}")
-            if isinstance(e, HTTPException):
-                return Response(
-                    content="unauthorized",
-                    status_code=401,
-                )
-            else:
-                return Response(
-                    content="unexpected error",
-                    status_code=500,
-                )
+            return Response(
+                content="unexpected error",
+                status_code=500,
+            )
      
 
     return web_app
