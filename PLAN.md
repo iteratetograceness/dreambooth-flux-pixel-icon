@@ -55,6 +55,12 @@ PR #2 merged the review branch into it. Remaining:
 - [x] Config source of truth: now in `api.py` inline config. Still open:
       `config.py`'s stale constants disagree (60/5 vs 50/7.5) — delete or
       unify (R2-10).
+- [x] NOTE for all future sessions: the Modal Dicts (dotelier-inference-config,
+      dotelier-styles, dotelier-http-config) are EXPECTED to be empty — Dict
+      entries have short TTLs, which is exactly why the owner moved config
+      in-file. Empty Dicts are NOT an outage signal. Never reintroduce Dicts
+      for config; delete the three Dict objects when convenient to remove the
+      confusion entirely.
 - [x] Leaked bypass secret rotated in Vercel + Modal (R2-4).
 - [ ] **Decision (R2-1)**: B200 `buffer_containers=1` + 30-min scaledown ≈
       up to ~$9k/mo idle under steady light traffic. Confirm intentional or
