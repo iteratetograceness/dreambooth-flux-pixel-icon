@@ -3,6 +3,7 @@ from pydantic import BaseModel
 from typing import TypedDict
 from PIL import Image
 import requests
+import os
 
 cuda_version = "12.4.0"
 flavor = "devel"
@@ -13,49 +14,95 @@ cuda_dev_image = ModalImage.from_registry(
     f"nvidia/cuda:{tag}", add_python="3.11"
 ).entrypoint([])
 
+# Pre-download model weights at image build time so they're baked into the
+# container image layer. This avoids ~22GB HuggingFace downloads on cold start.
+MODEL_DIR = "/model"
+BASE_MODEL = "black-forest-labs/FLUX.1-dev"
+LORA_REPO = "graceyun/lr_0.0002_steps_4200_rank_16_031325"
+LORA_WEIGHTS = "pytorch_lora_weights.safetensors"
+
+
+def download_models():
+    import os
+    # Disable hf_transfer for build step — it's a C extension that may not
+    # be available in the build container. Regular downloads are fine here
+    # since this only runs once at image build time.
+    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
+
+    from huggingface_hub import snapshot_download, hf_hub_download
+
+    snapshot_download(BASE_MODEL, local_dir=f"{MODEL_DIR}/base")
+    hf_hub_download(
+        LORA_REPO,
+        filename=LORA_WEIGHTS,
+        local_dir=f"{MODEL_DIR}/lora",
+    )
+
+
 image = (
     cuda_dev_image
     .apt_install(
         "libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1"
     )
     .pip_install(
-        "diffusers",
-        "transformers",
-        "accelerate",
-        "safetensors",
-        "peft",
-        "huggingface_hub[hf_transfer]",
+        "diffusers==0.31.0",
+        "transformers==4.44.0",
+        "accelerate==0.34.0",
+        "safetensors==0.4.5",
+        "peft==0.13.2",
+        "huggingface_hub[hf_transfer]==0.26.2",
         "fastapi[standard]",
         "pydantic>=2.0",
-        "sentencepiece>=0.1.91,!=0.1.92",
-        "torch",
-        "torchao",
-        "para-attn",
-        "numpy",
+        "sentencepiece==0.2.0",
+        "torch>=2.6.0",
+        # "torchao",
+        # "para-attn",
+        "numpy<2",
     )
     .env({
         "HF_HUB_ENABLE_HF_TRANSFER": "1",
-        "HF_HUB_CACHE": "/cache",
-        "PYTORCH_CUDA_ALLOC_CONF": "max_split_size_mb:512",
+        # Removed HF_HUB_CACHE — weights are now baked into the image at MODEL_DIR,
+        # so we no longer need a runtime cache volume for downloads.
+        "PYTORCH_ALLOC_CONF": "max_split_size_mb:512",
     })
+    .run_function(
+        download_models,
+        secrets=[Secret.from_name("huggingface-secret")],
+    )
     .add_local_python_source("ut")
 )
 
 app = App(name="dotelier-api")
 
-inference_config = Dict.from_name("dotelier-inference-config")
-styles = Dict.from_name("dotelier-styles")
-http_config = Dict.from_name("dotelier-http-config")
+config = {
+   "num_outputs": 1,
+   "num_inference_steps": 50,
+   "guidance_scale": 7.5,
+   "default_style": "color",
+   "allowed_origins": [
+    "https://dotelier.studio",
+    "https://www.dotelier.studio",
+    "http://localhost:3000",
+    "http://127.0.0.1:3000",
+   ],
+   "styles": {
+       "color": {
+            "token": "PXCON",
+            "suffix": ", pixel art, 16-bit style, clean minimal design, white background, sharp uniform black outline, no anti-aliasing, no blur, hard edges",
+            "negative_prompt": "ugly, blurry, noisy, messy, dirty, complex, detailed, photorealistic, 3d, gradient, shading, multiple outlines, double outline, text that says pxcon, text that says PXCON, written text, signature, watermark, low quality, distorted, deformed",
+        }
+   }
+}
 
 class InputModel(BaseModel):
     prompt: str
-    num_outputs: int = inference_config["NUM_OUTPUTS"]
+    num_outputs: int = config["num_outputs"]
     pixel_id: str
-    style: str = inference_config["DEFAULT_STYLE"]
+    style: str = config["default_style"]
 
 class InferenceConfig(InputModel):
-    num_inference_steps: int = inference_config["NUM_INFERENCE_STEPS"]
-    guidance_scale: float = inference_config["GUIDANCE_SCALE"]
+    num_inference_steps: int = config["num_inference_steps"]
+    guidance_scale: float = config["guidance_scale"]
     negative_prompt: str | None = None
     height: int = 1024
     width: int = 1024
@@ -75,7 +122,7 @@ class JWKSCache:
         return self.keys.get(kid)
     
     def refresh_keys(self):
-        response = requests.get(self.jwks_url, headers={"x-vercel-protection-bypass": http_config["VERCEL_AUTOMATION_BYPASS_SECRET"]})
+        response = requests.get(self.jwks_url, headers={"x-vercel-protection-bypass": os.environ["VERCEL_AUTOMATION_BYPASS_SECRET"]})
         jwks = response.json()
         self.keys = {key['kid']: key for key in jwks['keys']}
 
@@ -86,22 +133,28 @@ with image.imports():
     import time
 
 @app.cls(
-    gpu="H100",
+    gpu="B200",
     image=image,
     volumes={
-        "/cache": Volume.from_name("hf-hub-cache", create_if_missing=True),
-        "/quant": Volume.from_name("quant-cache", create_if_missing=True),
+        # "/cache": Volume.from_name("hf-hub-cache", create_if_missing=True),  # No longer needed — weights baked into image
+        # "/quant": Volume.from_name("quant-cache", create_if_missing=True),
         "/images": Volume.from_name("dotelier-sample-images"),
     },
     secrets=[
         Secret.from_name("huggingface-secret"),
+        Secret.from_name("vercel-automation-bypass"),
     ],
-    scaledown_window=1200,
+    max_containers=5,
+    min_containers=0,
+    buffer_containers=1,
+    scaledown_window=1800,  # 30 min idle before scaledown (was 20 min)
     timeout=60 * 60,
+    # enable_memory_snapshot=True, - Causing weird timing issues
+    # experimental_options={"enable_gpu_snapshot": True}, - Not working
 )
 class PixelModel:
     dev: str = parameter(default="false")
-    styles = styles
+    styles = config["styles"]
     is_dev: bool = False
                  
     @enter()
@@ -115,32 +168,33 @@ class PixelModel:
             print(f"loading model")
             
             from diffusers import FluxPipeline
-            from torchao.quantization import autoquant
-            from torchao.quantization.autoquant import AUTOQUANT_CACHE
-            from para_attn.first_block_cache.diffusers_adapters import apply_cache_on_pipe
-            
+            # from para_attn.first_block_cache.diffusers_adapters import apply_cache_on_pipe
+
+            # Load from baked-in local paths (no network download on cold start).
+            # To revert to runtime download, swap these back and re-enable /cache volume.
             self.pipeline = FluxPipeline.from_pretrained(
-                "graceyun/dotelier-color",
+                f"{MODEL_DIR}/base",  # was: "black-forest-labs/FLUX.1-dev"
                 torch_dtype=torch.bfloat16,
+                local_files_only=True,
             ).to('cuda')
-                        
-            self.pipeline.transformer.fuse_qkv_projections()
-            
-            with open("/quant/vae_autoquant_cache.pkl", "rb") as f:
-                AUTOQUANT_CACHE.update(pickle.load(f))
-                
-            self.pipeline.vae = autoquant(self.pipeline.vae, error_on_unseen=False)
-            
-            apply_cache_on_pipe(self.pipeline, residual_diff_threshold=0.12)
-            
-            torch.cuda.empty_cache()
-            gc.collect()
-            
+
+            self.pipeline.load_lora_weights(
+                f"{MODEL_DIR}/lora",  # was: "graceyun/lr_0.0002_steps_4200_rank_16_031325"
+                weight_name=LORA_WEIGHTS,  # was: "pytorch_lora_weights.safetensors"
+            )
+
+            # self.pipeline.transformer.fuse_qkv_projections()
+            # apply_cache_on_pipe(self.pipeline, residual_diff_threshold=0.06)
+
             _ = self.pipeline(
                 "a PXCON style icon, 16-bit",
                 num_inference_steps=5,
                 guidance_scale=5.0
             )
+            
+            torch.cuda.synchronize()
+            torch.cuda.empty_cache()
+            gc.collect()
                     
             print("✨ model loaded and optimized")
         except Exception as e:
@@ -149,8 +203,8 @@ class PixelModel:
             print(traceback.format_exc())
             raise
     
-    def generate_prompt(self, token: str, prompt: str, suffix: str = ''):
-        return f"a {token} style icon of: {prompt}{suffix}"
+    def generate_prompt(self, prompt: str):
+        return f"a PXCON, a 16-bit pixel art icon of {prompt}"
      
     @method()
     def inference(self, input: InputModel) -> InferenceResult:    
@@ -163,22 +217,15 @@ class PixelModel:
         if not style in self.styles:
             raise ValueError(f"Unknown style: {style}")
 
-        style_config = self.styles[style]
-        token = style_config["token"]
-        suffix = style_config["suffix"]
-        negative_prompt = style_config["negative_prompt"]
-        
         original_prompt = input.prompt
-        prompt = self.generate_prompt(token, original_prompt, suffix)
+        prompt = self.generate_prompt(original_prompt)
         
         config = InferenceConfig(
             prompt=prompt,
             num_outputs=input.num_outputs,
             style=style,
-            negative_prompt=negative_prompt,
             height=1024,
             width=1024,
-            num_images_per_prompt=input.num_outputs,
             pixel_id=input.pixel_id,
         )
         
@@ -199,7 +246,6 @@ class PixelModel:
                 num_inference_steps=config.num_inference_steps,
                 guidance_scale=config.guidance_scale,
                 num_images_per_prompt=config.num_outputs,
-                negative_prompt=config.negative_prompt,
                 height=config.height,
                 width=config.width,
             ).images
@@ -229,7 +275,12 @@ web_image = ModalImage.debian_slim().pip_install(
         Secret.from_name("pixel-auth-token"),
         Secret.from_name("uploadthing-secret"),
         Secret.from_name("uploadthing-app-id"),
+        Secret.from_name("vercel-automation-bypass"),
     ],
+    max_containers=10,
+    min_containers=0,
+    buffer_containers=2,
+    scaledown_window=300,
 )
 @asgi_app(label='dotelier-api')
 def fastapi_app():
@@ -252,7 +303,7 @@ def fastapi_app():
     
     web_app = FastAPI()
     
-    allowed_origins: list[str] = http_config["ALLOWED_ORIGINS"]
+    allowed_origins: list[str] = config["allowed_origins"]
     jwks_cache = JWKSCache("https://dotelier.studio/api/auth/jwks")
         
     auth_scheme = HTTPBearer()
