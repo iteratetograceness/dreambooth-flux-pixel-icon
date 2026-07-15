@@ -13,7 +13,9 @@ DATASET_2 = "graceyun/dreambooth-pixels" # 41 images
 
 app = App(name="dreambooth-flux")
 
-GIT_SHA = "7fb481f840b5d73982cafd1affe89f21a5c0b20b"
+# Pin to a diffusers release tag; all 24 launch args below verified present
+# in this version's train_dreambooth_lora_flux.py
+DIFFUSERS_TAG = "v0.39.0"
 volume = Volume.from_name(
     "dreambooth-flux", create_if_missing=True
 )
@@ -21,20 +23,21 @@ MODEL_DIR = "/dreambooth-flux"
 VOLUME_CONFIG = { MODEL_DIR: volume }
 
 image = (
-    Image.debian_slim(python_version="3.10")
+    Image.debian_slim(python_version="3.12")
     .pip_install(
-        "accelerate",
-        "datasets",
-        "bitsandbytes",
-        "hf_transfer",
+        # keep aligned with api.py's serving pins so the trained LoRA is
+        # produced/validated on the same stack it will be served with
+        "torch==2.13.0",
+        "accelerate==1.14.0",
+        "datasets==5.0.0",
+        "bitsandbytes==0.49.2",
         "wandb",
-        "torch"
     )
     .apt_install("git")
     .run_commands(
         "cd /root && git init .",
         "cd /root && git remote add origin https://github.com/huggingface/diffusers",
-        f"cd /root && git fetch --depth=1 origin {GIT_SHA} && git checkout {GIT_SHA}",
+        f"cd /root && git fetch --depth=1 origin tag {DIFFUSERS_TAG} && git checkout {DIFFUSERS_TAG}",
         "cd /root && pip install -e .",
         "cd /root/examples/dreambooth && pip install -r requirements_flux.txt"
     )
@@ -58,6 +61,10 @@ class TrainConfig():
     # keeping only the final (possibly overtrained) weights
     checkpointing_steps: int = 250
     seed: int = 42
+    # FLUX.1-dev is guidance-distilled: this value becomes the guidance
+    # EMBEDDING the LoRA adapts under, so it should match what serving uses.
+    # Previously implicit (script default 3.5) while prod served 5.0-7.5.
+    guidance_scale: float = 3.5
     validation_prompt: str = "a PXCON, a 16-bit pixel art icon of a brown puppy, on a white background"
     validation_epochs: int = 25
 
@@ -94,8 +101,8 @@ wandb_secret = Secret.from_name(
     "wandb_api_token"
 )
 image = image.env(
-    { 
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+    {
+        "HF_XET_HIGH_PERFORMANCE": "1",
         "PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:True"
     }
 )
@@ -159,6 +166,7 @@ def train(config):
             f"--checkpointing_steps={train_config.checkpointing_steps}",
             f"--rank={rank}",
             f"--seed={train_config.seed}",
+            f"--guidance_scale={train_config.guidance_scale}",
             "--caption_column=text",
             f"--validation_prompt={train_config.validation_prompt}",
             f"--validation_epochs={train_config.validation_epochs}",

@@ -4,6 +4,44 @@ Companion to `REVIEW.md` (adversarial review findings). Phases are ordered by
 dependency: nothing in Phase 2+ should ship until Phase 0 reconciles the repo
 with what's actually deployed on Modal.
 
+---
+
+## OWNERSHIP MANDATE (2026-07-15)
+
+The owner delegated the fine-tuning + inference-optimization loop end to end.
+Goal: an optimized `dotelier-api` (better model, faster inference) to replace
+what serves https://github.com/iteratetograceness/dotelier. Runner sessions
+(fresh containers with Modal tokens) execute; this plan is their contract.
+
+Pipeline:
+1. **Dataset v2** — rebuild from the hub dataset `graceyun/dreambooth-pixels`
+   (no local files needed): crop the huge white margins so icons fill ~90%
+   of frame, standardize to crisp 512 with NEAREST, push as
+   `graceyun/dreambooth-pixels-v2`. Fixes the two dataset findings (blur +
+   tiny-centered-icon composition).
+2. **Training** — refreshed stack (diffusers v0.39, torch 2.13), explicit
+   `--guidance_scale=3.5`, dataset v2, checkpoints every 250 steps. Compare
+   against the existing new-recipe run (trained on dataset v1) and the
+   original prod LoRA.
+3. **Model selection** — eval.py contact sheets across checkpoints; judge
+   style fidelity (in-domain rows), generalization (novel-object rows), and
+   frame usage. Commit curated sheets to the branch.
+4. **Inference speed** — already done: fused LoRA, slimmer baked image, exact
+   pins. From eval: pick lowest step count that holds quality (28 ≈ 5.8s vs
+   60 ≈ 12.3s per image); align serving guidance with training (3.5).
+   Optional second wave: torch.compile on the transformer, re-test
+   first-block cache at a conservative threshold on the new stack.
+5. **Staging deploy** — deploy the candidate as `dotelier-api-staging`
+   (separate Modal app + endpoint label; NEVER overwrite the prod
+   `dotelier-api` without explicit owner approval). Owner points the dotelier
+   frontend at staging or hits it directly to compare.
+6. **Promotion** — on owner's "promote": swap `LORA_REPO` + settings in
+   api.py, deploy to prod, tag the release.
+
+Standing rules for runners: inventory volumes before any GPU work (never redo
+completed work), push results incrementally, no prod deploys, no fuse.py, no
+PRs.
+
 ## Phase 0 — Reconcile deployed state — ✅ LARGELY DONE
 
 The owner pushed the real serving iteration to `main` ("boop", 82d359c):

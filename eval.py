@@ -24,20 +24,23 @@ from modal import App, Image as ModalImage, Volume, Secret
 app = App("dotelier-eval")
 
 image = (
-    ModalImage.debian_slim(python_version="3.11")
+    ModalImage.debian_slim(python_version="3.12")
     .pip_install(
-        "diffusers",
-        "transformers",
-        "accelerate",
-        "safetensors",
-        "peft",
-        "sentencepiece",
-        "torch",
-        "huggingface_hub[hf_transfer]",
+        # identical pins to api.py's serving image so evals measure the exact
+        # stack that serves — keep the two lists in sync
+        "diffusers==0.39.0",
+        "transformers==5.14.0",
+        "accelerate==1.14.0",
+        "safetensors==0.8.0",
+        "peft==0.19.1",
+        "huggingface_hub==1.23.0",
+        "sentencepiece==0.2.2",
+        "torch==2.13.0",
+        "numpy==2.5.1",
         "Pillow",
     )
     .env({
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        "HF_XET_HIGH_PERFORMANCE": "1",
         "HF_HUB_CACHE": "/cache",
     })
 )

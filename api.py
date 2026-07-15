@@ -23,12 +23,6 @@ LORA_WEIGHTS = "pytorch_lora_weights.safetensors"
 
 
 def download_models():
-    import os
-    # Disable hf_transfer for build step — it's a C extension that may not
-    # be available in the build container. Regular downloads are fine here
-    # since this only runs once at image build time.
-    os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "0"
-
     from huggingface_hub import snapshot_download, hf_hub_download
 
     # Skip the single-file BFL-format checkpoints (~24GB) that the
@@ -58,26 +52,30 @@ image = (
         "libglib2.0-0", "libsm6", "libxrender1", "libxext6", "ffmpeg", "libgl1"
     )
     .pip_install(
-        "diffusers==0.31.0",
-        "transformers==4.44.0",
-        "accelerate==0.34.0",
-        "safetensors==0.4.5",
-        "peft==0.13.2",
-        "huggingface_hub[hf_transfer]==0.26.2",
+        # Stack refreshed 2026-07, all exact-pinned. Validated end-to-end by
+        # the eval runs, which resolved these same versions and successfully
+        # loaded FLUX + LoRA and generated. B200 (Blackwell, sm_100) needs
+        # sm_100 kernels: torch 2.13's default wheel bundles CUDA 13, which
+        # requires host driver r580+ (Modal B200 hosts run 580.x — verified).
+        # If a rebuild ever lands on older drivers, fall back to torch==2.9.1
+        # (cu128, also sm_100-capable). Bump pins deliberately, never float.
+        "diffusers==0.39.0",
+        "transformers==5.14.0",
+        "accelerate==1.14.0",
+        "safetensors==0.8.0",
+        "peft==0.19.1",
+        "huggingface_hub==1.23.0",
         "fastapi[standard]",
         "pydantic>=2.0",
-        "sentencepiece==0.2.0",
-        # B200 (Blackwell, sm_100) requires a cu128-built wheel: default PyPI
-        # torch wheels only include sm_100 kernels from 2.8+ (2.6/2.7 resolve
-        # cu124/cu126 and fail with "no kernel image available" on B200).
-        # 2.9.1's default wheel is cu128 — verified. Bump deliberately, never float.
-        "torch==2.9.1",
+        "sentencepiece==0.2.2",
+        "torch==2.13.0",
         # "torchao",
         # "para-attn",
-        "numpy<2",
+        "numpy==2.5.1",
     )
     .env({
-        "HF_HUB_ENABLE_HF_TRANSFER": "1",
+        # hub 1.x replaced hf_transfer with built-in Xet transfer
+        "HF_XET_HIGH_PERFORMANCE": "1",
         # Removed HF_HUB_CACHE — weights are now baked into the image at MODEL_DIR,
         # so we no longer need a runtime cache volume for downloads.
         "PYTORCH_ALLOC_CONF": "max_split_size_mb:512",
