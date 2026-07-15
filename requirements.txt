@@ -1,0 +1,24 @@
+# Core dependencies
+modal
+pydantic
+requests
+
+# Deep learning and ML
+torch>=2.0.0
+torchvision
+transformers
+diffusers
+accelerate
+peft
+datasets
+numpy
+
+# Image processing
+Pillow
+
+# Utilities
+tqdm
+sqids
+
+# Hugging Face
+huggingface-hub
