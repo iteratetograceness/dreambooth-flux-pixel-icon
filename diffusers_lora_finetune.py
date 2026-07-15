@@ -8,8 +8,10 @@ from modal import App, Image, Secret, Volume
 # FOLDER_3 = "lr_0.0002_steps_4200_rank_16"
 # FOLDER_4 = "lr_0.0002_steps_4200_rank_16_031325"  <- trained with train_batch_size=41 (full-batch)
 
-DATASET_1 = "graceyun/pixel-pngs-dreambooth" # 31 images
-DATASET_2 = "graceyun/dreambooth-pixels" # 41 images
+DATASET_1 = "graceyun/pixel-pngs-dreambooth" # 31 images, pristine 512 but tiny icons
+DATASET_2 = "graceyun/dreambooth-pixels" # 41 images, 1024, AA'd edges + small icons
+# 41 subjects rebuilt crisp + recomposed to fill the frame (see dataset_v2.py)
+DATASET_3 = "graceyun/dreambooth-pixels-v2"
 
 app = App(name="dreambooth-flux")
 
@@ -48,7 +50,7 @@ class TrainConfig():
     instance_name: str = "PXCON"
     # class_name: str = "a simple 16-bit pixel art icon on a white background"
     model_name: str = "black-forest-labs/FLUX.1-dev"
-    dataset_name: str = DATASET_2
+    dataset_name: str = DATASET_3
     resolution: int = 512
     # batch 4 on a 41-image set ≈ 10 steps/epoch. The previous batch_size=41
     # (the entire dataset in one batch) made every step full-batch gradient
@@ -89,7 +91,8 @@ def generate_sweep_configs(sweep_config: SweepConfig):
             "rank": rank,
             # derive the folder from the actual params so names can't drift
             # from reality (FOLDER_3/4 said steps_4200 while the sweep ran 4100)
-            "output_dir": f"{MODEL_DIR}/lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
+            # dsv2 prefix: distinguishes dataset-v2 runs from the v1 run dirs
+            "output_dir": f"{MODEL_DIR}/dsv2_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
         }
         for lr, steps, rank in param_combinations
     ]
