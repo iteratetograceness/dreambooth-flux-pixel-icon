@@ -1,10 +1,49 @@
 # Adversarial Review — dotelier (dreambooth-flux-pixel-icon)
 
-Method: 4 independent review lenses (security, Modal correctness, ML/fine-tuning
-methodology, ops/cost/drift), every finding then challenged by an adversarial
-verifier against the actual code — 31 raw findings, 25 confirmed, 6 refuted.
+Method: independent review lenses, every finding then challenged by an
+adversarial verifier against the actual code.
 Status legend: **fixed** = patched on this branch · **plan** = tracked in
-`PLAN.md` (needs Modal access, a product decision, or an eval result first).
+`PLAN.md` (needs Modal access, a product decision, or an eval result first) ·
+**decision** = deliberate tradeoff for the owner to confirm.
+
+---
+
+## ROUND 2 — audit of the new serving stack (post-"boop" push)
+
+The owner's push replaced the serving architecture: weights baked into the
+image at build time (base FLUX.1-dev + unfused LoRA, no more fused
+`dotelier-color`), B200 GPU, static in-file config, pinned deps, torchao/
+para-attn removed, training-matched prompt template. That rewrite resolved
+several Round 1 findings outright (#3 template mismatch, #15 negative-prompt
+no-op — dropped, #16 unpinned deps — mostly, #18 Dict reads, #17 partially).
+17 raw Round 2 findings, 14 confirmed, 3 refuted.
+
+| # | Finding | Status |
+|---|---------|--------|
+| R2-1 | **B200 idle cost**: `buffer_containers=1` + `scaledown_window=1800` on a ~$6.25/hr B200 — every isolated request warms 2 containers and each idles 30 min; worst-case steady light traffic approaches ~$9k/month of idle GPU. Web tier also keeps `buffer_containers=2`. | **decision** — deliberate latency tradeoff; confirm the math is worth it or drop buffer to 0 / shrink window |
+| R2-2 | **`torch>=2.6.0` floating on B200**: default wheels for 2.6/2.7 lack Blackwell sm_100 kernels ("no kernel image available" → crash-looping billed B200); today it resolves a torch ~2 years newer than the pinned diffusers 0.31.0 was ever tested with. Works by accident. | fixed (pinned `torch==2.9.1`, cu128 wheel — verify one cold start before trusting a rebuild) |
+| R2-3 | **guidance_scale 7.5** on guidance-distilled FLUX whose LoRA adapted at 3.5 — served ~2× off-distribution on every request; classic FLUX "burn" territory. Repo now carries three inconsistent values (3.5 trained, 5 in config.py, 7.5 served). | plan (eval matrix compares 7.5 vs 3.5 — pick from the contact sheet) |
+| R2-4 | **Leaked bypass secret in git history** (commit 82d359c) — the Vercel protection-bypass value was pushed. | **resolved** — owner rotated it in Vercel and updated the Modal secret; old value is dead |
+| R2-5 | **Templated prompt re-validated at 500 chars**: user prompts of 465–500 chars passed the API boundary then crashed inference (template adds 36 chars, InferenceConfig re-ran the validator). Introduced by Round 1's own hardening. | fixed (InferenceConfig overrides `prompt` unconstrained) |
+| R2-6 | **Image bakes the full 58GB HF repo**: `snapshot_download` with no filters includes the 24GB single-file BFL checkpoints FluxPipeline never reads; no `revision=` pin either. | fixed (ignore_patterns; revision pin still TODO) |
+| R2-7 | **LoRA served unfused**: rank-16 adapter matmuls ran on every projection, all 50 steps, every request — the old architecture served fused weights; the rewrite silently started paying this. | fixed (`fuse_lora()` + `unload_lora_weights()` at startup; numerically equivalent) |
+| R2-8 | **Web tier 300s default timeout** vs synchronous cold-start + 50-step generate + serial uploads (persisted from Round 1 #17, worse now with 58GB weight streaming). | fixed stopgap (`timeout=900`); real fix = spawn + poll, in plan |
+| R2-9 | **Unused secrets on the internet-facing web function** (write-capable HF token, super-admin-user-id) — persisted from Round 1 #12. | fixed (removed from `fastapi_app`; PixelModel's HF secret left — likely also removable now that weights are baked) |
+| R2-10 | **Config drift inside the repo**: `config.py` (60 steps / guidance 5 / suffix system) is imported by nothing; `api.py`'s inline config (50 / 7.5) is what serves. The styles dict in api.py is decorative — token/suffix/negative_prompt are never applied; only a membership check uses it. | plan (single source of truth; let eval decide whether the suffix earns its place) |
+| R2-11 | Warmup generation still uses the old prompt template and guidance 5.0 (serving uses 7.5) — harmless for warming kernels, but inconsistent. | plan (align with serving values when guidance is settled) |
+
+Refuted in verification: 2 stale claims describing pre-fix eval.py, and 1
+claim that requirements.txt drives any runtime (it doesn't — Modal images are
+the spec; it's contributor convenience only).
+
+---
+
+## ROUND 1 — original audit (pre-rewrite architecture)
+
+31 raw findings, 25 confirmed, 6 refuted. Note: findings #3, #12, #15, #16,
+#17, #18 were subsequently resolved or superseded by the owner's serving
+rewrite and the Round 2 fixes above; #14's "fresh environment can't boot"
+concern is now moot (config lives in-file, not in Modal Dicts).
 
 ## Model quality (the fine-tune itself)
 

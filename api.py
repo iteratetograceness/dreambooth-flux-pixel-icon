@@ -31,7 +31,20 @@ def download_models():
 
     from huggingface_hub import snapshot_download, hf_hub_download
 
-    snapshot_download(BASE_MODEL, local_dir=f"{MODEL_DIR}/base")
+    # Skip the single-file BFL-format checkpoints (~24GB) that the
+    # diffusers-layout FluxPipeline never reads — roughly 40% of the repo.
+    # TODO: pin revision= for reproducible rebuilds.
+    snapshot_download(
+        BASE_MODEL,
+        local_dir=f"{MODEL_DIR}/base",
+        ignore_patterns=[
+            "flux1-dev.safetensors",
+            "ae.safetensors",
+            "*.md",
+            "*.png",
+            ".gitattributes",
+        ],
+    )
     hf_hub_download(
         LORA_REPO,
         filename=LORA_WEIGHTS,
@@ -54,7 +67,11 @@ image = (
         "fastapi[standard]",
         "pydantic>=2.0",
         "sentencepiece==0.2.0",
-        "torch>=2.6.0",
+        # B200 (Blackwell, sm_100) requires a cu128-built wheel: default PyPI
+        # torch wheels only include sm_100 kernels from 2.8+ (2.6/2.7 resolve
+        # cu124/cu126 and fail with "no kernel image available" on B200).
+        # 2.9.1's default wheel is cu128 — verified. Bump deliberately, never float.
+        "torch==2.9.1",
         # "torchao",
         # "para-attn",
         "numpy<2",
@@ -101,6 +118,9 @@ class InputModel(BaseModel):
     style: str = config["default_style"]
 
 class InferenceConfig(InputModel):
+    # the composed prompt (template + user prompt) can exceed the user-facing
+    # 500-char cap — don't re-validate it here or 465+ char prompts 500
+    prompt: str
     num_inference_steps: int = config["num_inference_steps"]
     guidance_scale: float = config["guidance_scale"]
     negative_prompt: str | None = None
@@ -196,6 +216,12 @@ class PixelModel:
                 weight_name=LORA_WEIGHTS,  # was: "pytorch_lora_weights.safetensors"
             )
 
+            # fuse once at startup: numerically equivalent output, but removes
+            # the per-projection lora_A/lora_B matmul overhead that otherwise
+            # runs on all 50 steps of every request
+            self.pipeline.fuse_lora()
+            self.pipeline.unload_lora_weights()
+
             # self.pipeline.transformer.fuse_qkv_projections()
             # apply_cache_on_pipe(self.pipeline, residual_diff_threshold=0.06)
 
@@ -283,8 +309,9 @@ web_image = ModalImage.debian_slim().pip_install(
 @app.function(
     image=web_image,
     secrets=[
-        Secret.from_name("super-admin-user-id"),
-        Secret.from_name("huggingface-secret"),
+        # super-admin-user-id and huggingface-secret removed: nothing in the
+        # web path reads them, and the HF token is write-capable — an
+        # internet-facing container shouldn't carry it
         Secret.from_name("pixel-auth-token"),
         Secret.from_name("uploadthing-secret"),
         Secret.from_name("uploadthing-app-id"),
@@ -294,6 +321,10 @@ web_image = ModalImage.debian_slim().pip_install(
     min_containers=0,
     buffer_containers=2,
     scaledown_window=300,
+    # Modal's default 300s is shorter than a worst-case B200 scale-from-zero
+    # (weight streaming + warmup + 50-step generate + uploads); stopgap until
+    # /generate moves to spawn + poll
+    timeout=900,
 )
 @asgi_app(label='dotelier-api')
 def fastapi_app():

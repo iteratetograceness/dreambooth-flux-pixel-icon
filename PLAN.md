@@ -4,25 +4,23 @@ Companion to `REVIEW.md` (adversarial review findings). Phases are ordered by
 dependency: nothing in Phase 2+ should ship until Phase 0 reconciles the repo
 with what's actually deployed on Modal.
 
-## Phase 0 — Reconcile deployed state (BLOCKED: needs Modal access)
+## Phase 0 — Reconcile deployed state — ✅ LARGELY DONE
 
-The deployed `dotelier-api` app is known to differ from `main`, and the live
-config lives in Modal Dicts (`dotelier-inference-config`, `dotelier-styles`,
-`dotelier-http-config`) that `config.py` no longer reflects (its setup lines
-are commented out).
+The owner pushed the real serving iteration to `main` ("boop", 82d359c):
+baked-in weights (base FLUX + unfused LoRA), B200, static in-file config.
+PR #2 merged the review branch into it. Remaining:
 
-With Modal access (MCP connector or `MODAL_TOKEN_ID`/`MODAL_TOKEN_SECRET` in
-this environment):
-
-- [ ] Dump the live Dict contents (`NUM_INFERENCE_STEPS`, `GUIDANCE_SCALE`,
-      `NUM_OUTPUTS`, style configs incl. `token`/`suffix`/`negative_prompt`,
-      allowed origins) and commit them to `config.py` as the checked-in source
-      of truth (secrets excluded).
-- [ ] `modal app list` / inspect the deployed `dotelier-api` to determine
-      whether the live container uses the AOT-compiled transformer from
-      `aot.py` or the `api.py` path in this repo; capture the real deployed
-      code into git (branch `deployed-snapshot`) and diff against `main`.
-- [ ] Only then merge the `api.py` hardening from this branch and redeploy.
+- [ ] Confirm the deployed `dotelier-api` app matches the merged `main`
+      exactly (redeploy from `main` to be sure), and note that redeploying
+      picks up the Round 2 fixes (torch pin, fused LoRA, secret scoping,
+      timeout) — see REVIEW.md Round 2.
+- [x] Config source of truth: now in `api.py` inline config. Still open:
+      `config.py`'s stale constants disagree (60/5 vs 50/7.5) — delete or
+      unify (R2-10).
+- [x] Leaked bypass secret rotated in Vercel + Modal (R2-4).
+- [ ] **Decision (R2-1)**: B200 `buffer_containers=1` + 30-min scaledown ≈
+      up to ~$9k/mo idle under steady light traffic. Confirm intentional or
+      tune down.
 
 ## Phase 1 — Fine-tune evaluation (needs Modal for GPU; harness is ready)
 
