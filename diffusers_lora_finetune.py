@@ -12,6 +12,8 @@ DATASET_1 = "graceyun/pixel-pngs-dreambooth" # 31 images, pristine 512 but tiny 
 DATASET_2 = "graceyun/dreambooth-pixels" # 41 images, 1024, AA'd edges + small icons
 # 41 subjects rebuilt crisp + recomposed to fill the frame (see dataset_v2.py)
 DATASET_3 = "graceyun/dreambooth-pixels-v2"
+# v3: + 6 owner icons (thin geometry) + style-baked captions
+DATASET_4 = "graceyun/dreambooth-pixels-v3"
 
 app = App(name="dreambooth-flux")
 
@@ -50,7 +52,7 @@ class TrainConfig():
     instance_name: str = "PXCON"
     # class_name: str = "a simple 16-bit pixel art icon on a white background"
     model_name: str = "black-forest-labs/FLUX.1-dev"
-    dataset_name: str = DATASET_3
+    dataset_name: str = DATASET_4
     resolution: int = 512
     # batch 4 on a 41-image set ≈ 10 steps/epoch. The previous batch_size=41
     # (the entire dataset in one batch) made every step full-batch gradient
@@ -72,8 +74,8 @@ class TrainConfig():
 
 @dataclass
 class SweepConfig():
-    # 5e-5 added: the dsv2 run at 1e-4 showed overfit artifacts by step 1000
-    learning_rates = [1e-4, 5e-5] # previous runs: 1e-6 (too low), 2e-4
+    # 1e-4 won the v2.1 sweep (5e-5 kept tinted backgrounds longer)
+    learning_rates = [1e-4] # previous runs: 1e-6 (too low), 5e-5, 2e-4
     train_steps = [1500] # ≈ 146 epochs at batch 4; eval checkpoints at 250-step intervals
     ranks = [16]
 
@@ -92,8 +94,8 @@ def generate_sweep_configs(sweep_config: SweepConfig):
             "rank": rank,
             # derive the folder from the actual params so names can't drift
             # from reality (FOLDER_3/4 said steps_4200 while the sweep ran 4100)
-            # dsv21 prefix: dataset v2.1 (62% fill) runs
-            "output_dir": f"{MODEL_DIR}/dsv21_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
+            # dsv3 prefix: dataset v3 (owner icons + style captions) runs
+            "output_dir": f"{MODEL_DIR}/dsv3_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
         }
         for lr, steps, rank in param_combinations
     ]

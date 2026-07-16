@@ -19,8 +19,29 @@ from modal import App, Image as ModalImage, Volume, Secret
 
 app = App("dotelier-dataset-v2")
 
-image = ModalImage.debian_slim(python_version="3.12").pip_install(
-    "datasets==5.0.0", "Pillow", "numpy", "huggingface_hub==1.23.0"
+image = (
+    ModalImage.debian_slim(python_version="3.12")
+    .pip_install("datasets==5.0.0", "Pillow", "numpy", "huggingface_hub==1.23.0")
+    # round-3 additions drawn/collected by the owner (thin geometry coverage)
+    .add_local_dir("icons-v3", remote_path="/icons-v3")
+)
+
+# subject text for the icons-v3 files (filename -> subject)
+NEW_ICONS = {
+    "battery.png": "a hand holding a battery, with sparkles",
+    "cold-water.png": "a shower head with water drops",
+    "key.png": "a golden key and a pink heart",
+    "umbrella.png": "an open blue umbrella",
+    "wine.png": "a wine bottle and a glass of wine",
+    "pixel-art-electric-guitar-icon-retro-8-bit-musical-instrument-illustration-vector.jpg":
+        "an orange electric guitar",
+}
+
+# round 3 bakes the style into the captions so serving prompts stay short and
+# the style/background binding no longer depends on a long serving template
+STYLE_CAPTION = (
+    "a PXCON, an 8-bit pixel art icon of {subject}, "
+    "thick black outline, flat colors, on a white background"
 )
 
 eval_volume = Volume.from_name("dotelier-eval", create_if_missing=True)
@@ -103,16 +124,42 @@ def build(push_repo: str = "graceyun/dreambooth-pixels-v2") -> dict:
     for row in pristine:
         pristine_by_subject[_subject(row["text"])] = row["image"].convert("RGB")
 
-    out_rows = []
-    report = []
+    def to_rgb_on_white(img):
+        """Composite any transparency onto white before processing."""
+        if img.mode in ("RGBA", "LA") or (img.mode == "P" and "transparency" in img.info):
+            rgba = img.convert("RGBA")
+            base = Image.new("RGBA", rgba.size, (255, 255, 255, 255))
+            base.alpha_composite(rgba)
+            return base.convert("RGB")
+        return img.convert("RGB")
+
+    sources = []
     for row in v1:
-        caption = row["text"]
-        subj = _subject(caption)
-        src = pristine_by_subject.get(subj)
+        # normalized key for matching; raw phrase (articles intact) for captions
+        subj_raw = row["text"].split(" icon of ", 1)[-1].strip()
+        src = pristine_by_subject.get(_subject(row["text"]))
         origin = "pristine-512"
         if src is None:
             src = row["image"].convert("RGB")
             origin = "v1-1024"
+        sources.append((subj_raw, src, origin))
+    import os as _os
+    for fname, subj in NEW_ICONS.items():
+        path = f"/icons-v3/{fname}"
+        if not _os.path.exists(path):
+            print(f"WARNING: missing {path}, skipping")
+            continue
+        img = to_rgb_on_white(Image.open(path))
+        # stock JPGs carry compression noise around edges; adaptive-quantize
+        # first so run-length cell detection sees flat runs again
+        if len(set(img.resize((128, 128), Image.NEAREST).getdata())) > 100:
+            img = img.quantize(colors=24).convert("RGB")
+        sources.append((subj, img, f"icons-v3:{fname}"))
+
+    out_rows = []
+    report = []
+    for subj, src, origin in sources:
+        caption = STYLE_CAPTION.format(subject=subj)
 
         arr = np.asarray(src)
         box = _bbox(arr)
@@ -180,5 +227,5 @@ def build(push_repo: str = "graceyun/dreambooth-pixels-v2") -> dict:
 
 
 @app.local_entrypoint()
-def main(push_repo: str = "graceyun/dreambooth-pixels-v2"):
+def main(push_repo: str = "graceyun/dreambooth-pixels-v3"):
     build.remote(push_repo)

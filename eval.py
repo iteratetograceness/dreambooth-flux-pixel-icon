@@ -75,6 +75,8 @@ TEMPLATES = {
     # owner reference style is chunky 8-bit; captions said 16-bit — test both
     "bit8": "a {token}, an 8-bit pixel art icon of {prompt}",
     "bit8_white": "a {token}, a simple chunky 8-bit pixel art icon of {prompt}, thick black outline, flat colors, on a plain white background",
+    # exact dataset-v3 caption format (STYLE_CAPTION in dataset_v2.py)
+    "v3": "a {token}, an 8-bit pixel art icon of {prompt}, thick black outline, flat colors, on a white background",
 }
 
 # what production actually serves today (api.py): base FLUX.1-dev + this LoRA,
