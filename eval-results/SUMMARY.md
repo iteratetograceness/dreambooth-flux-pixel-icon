@@ -127,3 +127,12 @@ keeping the finer 16-bit look — a good alternate style.
 **Final staging recipe: base FLUX.1-dev + graceyun/dotelier-pixel-v21-ckpt1000
 (fused), 28 steps, guidance 5.0, the chunky-8-bit template above.**
 Known nit: "cup of coffee" tends to lose its handle with the chunky template.
+
+## Staging smoke, v2.1 recipe (2026-07-16)
+
+`smoke_mushroom_v21.png` / `smoke_floppy_v21.png` — unseeded generations
+through the deployed dotelier-api-staging (B200, fused v21-ckpt1000, chunky
+8-bit template, g5.0, 28 steps): ~3.1s each, on-style, crisp, white bg.
+Note: occasional soft-focus samples occur (a cactus render came out
+gaussian-soft); if it bothers, options are a serving-side grid re-snap
+post-process or baking the style into captions in a round-3 retrain.
