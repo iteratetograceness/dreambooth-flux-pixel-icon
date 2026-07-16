@@ -36,10 +36,10 @@ cuda_dev_image = ModalImage.from_registry(
 # container image layer. This avoids ~22GB HuggingFace downloads on cold start.
 MODEL_DIR = "/model"
 BASE_MODEL = "black-forest-labs/FLUX.1-dev"
-# v2.1 winner: dataset v2.1 (crisp, 62% fill), lr 1e-4, checkpoint 1000.
-# Template + guidance below are part of the recipe (template shootout,
-# eval-results/09_template_shootout.png).
-LORA_REPO = "graceyun/dotelier-pixel-v21-ckpt1000"
+# round-3 winner: dataset v3 (owner thin-geometry icons + style-baked
+# captions), lr 1e-4, checkpoint 1000. Template must match the training
+# captions exactly (eval-results/10_dsv3_round3.png).
+LORA_REPO = "graceyun/dotelier-pixel-v3-ckpt1000"
 LORA_WEIGHTS = "pytorch_lora_weights.safetensors"
 
 
@@ -249,9 +249,10 @@ class PixelModel:
             raise
 
     def generate_prompt(self, prompt: str):
+        # exact dataset-v3 caption format (STYLE_CAPTION in dataset_v2.py)
         return (
-            f"a PXCON, a simple chunky 8-bit pixel art icon of {prompt}, "
-            "thick black outline, flat colors, on a plain white background"
+            f"a PXCON, an 8-bit pixel art icon of {prompt}, "
+            "thick black outline, flat colors, on a white background"
         )
 
     @method()
