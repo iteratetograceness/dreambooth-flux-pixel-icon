@@ -136,3 +136,22 @@ through the deployed dotelier-api-staging (B200, fused v21-ckpt1000, chunky
 Note: occasional soft-focus samples occur (a cactus render came out
 gaussian-soft); if it bothers, options are a serving-side grid re-snap
 post-process or baking the style into captions in a round-3 retrain.
+
+## Round 3: dataset v3 — thin-geometry icons + style-baked captions (2026-07-16)
+
+`10_dsv3_round3.png` — owner added 6 icons (umbrella, wine bottle+glass, key,
+shower head, hand+battery, guitar) covering thin/diagonal geometry; all
+captions rewritten to bake in the style phrase. Trained dsv3 lr1e-4.
+
+- **Guitar: fixed** (now in-domain — clean diagonal neck, staircase outlines).
+- **Rocket: fixed while still a holdout** — never trained, now renders a
+  crisp white-bg icon with chunky flame. Real generalization win.
+- Lighthouse (holdout): tidier outlines, still a dark night vignette (the
+  prompt says "at night"; plain "a lighthouse" renders on white).
+- Caption-baking works: caption-matched template gives white backgrounds;
+  the short template shows good style but tinted backgrounds — keep the
+  long template at serve time.
+- **Winner: dsv3 checkpoint-1000, caption template, guidance 5.0** →
+  `graceyun/dotelier-pixel-v3-ckpt1000`, now on staging.
+- Still open: coffee cup renders handle-less (candidate for one more icon:
+  a mug with a prominent handle).
