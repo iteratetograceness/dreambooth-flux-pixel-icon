@@ -35,9 +35,11 @@ Pipeline:
    (separate Modal app + endpoint label; NEVER overwrite the prod
    `dotelier-api` without explicit owner approval). Owner points the dotelier
    frontend at staging or hits it directly to compare.
-   → done 2026-07-15: `api_staging.py` serves
-   `graceyun/dotelier-pixel-v2-ckpt750` at 28 steps / guidance 3.5,
-   https://iteratetograceness--dotelier-api-staging.modal.run
+   → updated 2026-07-16 after owner style feedback (true chunky 8-bit,
+   black outline): `api_staging.py` serves the dataset-v2.1 retrain
+   `graceyun/dotelier-pixel-v21-ckpt1000` (fused) at 28 steps /
+   guidance 5.0 with the chunky-8-bit template (see eval-results
+   09_template_shootout.png), https://iteratetograceness--dotelier-api-staging.modal.run
 6. **Promotion** — on owner's "promote": swap `LORA_REPO` + settings in
    api.py (copy the values from api_staging.py, but keep prod's
    buffer_containers/scaledown), deploy to prod, tag the release.
@@ -113,10 +115,18 @@ validation prompts to wandb re-enabled.
 - [x] Winning LoRA published to a private HF repo:
       `graceyun/dotelier-pixel-v2-ckpt750` (`upload_lora.py`). No fuse.py —
       serving fuses at startup (`fuse_lora()`), same as prod.
-- [ ] Dataset v2 follow-ups (optional, next round): margin crop + NEAREST
-      512 re-process (`graceyun/dreambooth-pixels` → `-v2`), captions audit,
-      higher-res training, more diverse subjects. Known v1 regression worth
-      targeting: "cup of coffee" renders handle-less on all new checkpoints.
+- [x] Dataset v2 built (2026-07-16, `dataset_v2.py`): pristine pixels via
+      logical-grid re-snap + recompose. v2.0 (88% fill) failed — erased the
+      white-bg signal, model drifted to illustration style then overfit.
+      v2.1 (62% fill) is the shipped version (`graceyun/dreambooth-pixels-v2`).
+- [x] Retrained on v2.1, lr sweep 1e-4 vs 5e-5 (dirs `dsv21_lr_*` on the
+      volume). Winner: **lr 1e-4 checkpoint-1000**, published as
+      `graceyun/dotelier-pixel-v21-ckpt1000`. Serve with the chunky-8-bit
+      template + guidance 5.0 (template shootout, eval-results 09).
+- [ ] Round-3 retrain (optional): bake the style into captions
+      ("an 8-bit pixel art icon of X, thick black outline, flat colors, on a
+      white background") so the long serving template isn't needed; also
+      targets the occasional soft-focus sample and the handle-less coffee cup.
 
 ## Phase 3 — API hardening (done in this branch; deploy after Phase 0)
 
