@@ -35,11 +35,11 @@ Pipeline:
    (separate Modal app + endpoint label; NEVER overwrite the prod
    `dotelier-api` without explicit owner approval). Owner points the dotelier
    frontend at staging or hits it directly to compare.
-   → updated 2026-07-16 after owner style feedback (true chunky 8-bit,
-   black outline): `api_staging.py` serves the dataset-v2.1 retrain
-   `graceyun/dotelier-pixel-v21-ckpt1000` (fused) at 28 steps /
-   guidance 5.0 with the chunky-8-bit template (see eval-results
-   09_template_shootout.png), https://iteratetograceness--dotelier-api-staging.modal.run
+   → current (2026-07-16, round 3): `api_staging.py` serves the dataset-v3
+   retrain `graceyun/dotelier-pixel-v3-ckpt1000` (fused) at 28 steps /
+   guidance 5.0 with the caption-matched template (eval-results
+   10_dsv3_round3.png; smoke: rocket + guitar fixed).
+   https://iteratetograceness--dotelier-api-staging.modal.run
 6. **Promotion** — on owner's "promote": swap `LORA_REPO` + settings in
    api.py (copy the values from api_staging.py, but keep prod's
    buffer_containers/scaledown), deploy to prod, tag the release.
