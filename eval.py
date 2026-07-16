@@ -72,6 +72,9 @@ TEMPLATES = {
     "prod": "a {token}, a 16-bit pixel art icon of {prompt}",
     "white_bg": "a {token}, a 16-bit pixel art icon of {prompt}, on a white background",
     "legacy": "a {token} style icon of: {prompt}",
+    # owner reference style is chunky 8-bit; captions said 16-bit — test both
+    "bit8": "a {token}, an 8-bit pixel art icon of {prompt}",
+    "bit8_white": "a {token}, a simple chunky 8-bit pixel art icon of {prompt}, thick black outline, flat colors, on a plain white background",
 }
 
 # what production actually serves today (api.py): base FLUX.1-dev + this LoRA,
