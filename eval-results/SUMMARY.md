@@ -97,3 +97,19 @@ g3.5 AND g5.0/7.5.
   pristine pixels where available (30/41), logical-grid re-snap via
   run-length cell detection, integer NEAREST upscale to ~60–85% frame fill,
   clean white 512 canvas, captions carried over.
+
+## Hill-climb round 2: dataset v2.1 (62% fill) — the breakthrough (2026-07-16)
+
+`08_dsv21_lr_00001.png` / `08_dsv21_lr_5e05.png` — retrained on the rebuilt
+dataset (pristine pixels, icons at ~62% linear fill with real white margins),
+lr sweep 1e-4 vs 5e-5.
+
+- **Winner: lr 1e-4, checkpoint 750–1000, guidance 3.5, 28 steps** — crisp
+  uniform pixel cells, white-ish backgrounds, all 12 subjects correct,
+  coffee cup has a handle. Degradation starts at ckpt-1250.
+- lr 5e-5 is prettier/more illustrated but keeps tinted backgrounds and
+  scene shading longer; a "PXCON" caption renders into one image.
+- Remaining nit: context-tinted backgrounds on environment-implying prompts
+  (rocket→sky, snail→leaf-green). Root cause: training captions never say
+  "on a white background". Serving-side fix under eval (white_bg template);
+  training-side fix for next round: append the phrase to dataset captions.
