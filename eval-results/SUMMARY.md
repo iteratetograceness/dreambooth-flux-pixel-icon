@@ -155,3 +155,16 @@ captions rewritten to bake in the style phrase. Trained dsv3 lr1e-4.
   `graceyun/dotelier-pixel-v3-ckpt1000`, now on staging.
 - Still open: coffee cup renders handle-less (candidate for one more icon:
   a mug with a prominent handle).
+
+## Round 4 evals (2026-07-16)
+
+- `13_speedwin_std.png` / `14_speedwin_novel.png` — prod's exact model at
+  50 vs 35 vs 28 steps, seed-matched, both suites: **near pixel-identical**.
+  The speed-only promote (50 → 28 steps, ~2x latency/cost) is fully
+  validated; even prod's skateboard failure is identical at every step count
+  (model limitation, not steps).
+- `15_v3_novel_guidance.png` — v3 on the novel suite at g3.5/5.0/7.5:
+  **no dial fixes the novel-prompt muddiness**. 3.5 goes soft/melty, 7.5
+  adds glitch artifacts + PXCON text; 5.0 (staging today) is already the
+  best. Verdict: data problem, not a dial problem — the full-batch
+  replication run (dsv3fb) and/or more training icons is the path.
