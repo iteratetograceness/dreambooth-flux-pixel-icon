@@ -104,11 +104,13 @@ def evaluate(
     model_repo: str = "graceyun/dotelier-color",
     lora_repo: str = "",
     checkpoint_dir: str = "",
+    prompts_json: str = "",
 ):
     """Load one model source, then sweep configs over the prompt suite.
 
     configs_json: JSON list of {"steps": int, "guidance": float, "template": str}
     lora_repo / checkpoint_dir switch the source to base FLUX.1-dev + LoRA.
+    prompts_json: optional JSON list of subjects to use instead of PROMPT_SUITE.
     """
     import os
     import time
@@ -116,6 +118,9 @@ def evaluate(
     from diffusers import FluxPipeline
 
     configs = json.loads(configs_json)
+    global PROMPT_SUITE
+    if prompts_json:
+        PROMPT_SUITE = json.loads(prompts_json)
 
     use_lora = bool(lora_repo or checkpoint_dir)
     base = "black-forest-labs/FLUX.1-dev" if use_lora else model_repo
