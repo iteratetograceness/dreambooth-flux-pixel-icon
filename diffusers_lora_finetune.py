@@ -54,16 +54,18 @@ class TrainConfig():
     model_name: str = "black-forest-labs/FLUX.1-dev"
     dataset_name: str = DATASET_4
     resolution: int = 512
-    # batch 4 on a 41-image set ≈ 10 steps/epoch. The previous batch_size=41
-    # (the entire dataset in one batch) made every step full-batch gradient
-    # descent — 4200 steps ≈ 4200 epochs, deep in overfit territory.
-    train_batch_size: int = 4
+    # FULL-BATCH REPLICATION RUN: the deployed prod LoRA everyone loves came
+    # from full-batch descent (bs=41, lr 2e-4, ~4200 epochs) squeezed through
+    # rank 16 — deep style convergence without literal memorization. This run
+    # replicates that recipe on the clean v3 data (47 images).
+    # (The "textbook" recipe was bs=4 / lr 1e-4 / 1500 steps.)
+    train_batch_size: int = 47
     gradient_accumulation_steps: int = 1
     lr_scheduler: str = "constant_with_warmup"
     lr_warmup_steps: int = 100
     # checkpoint often so eval.py can compare checkpoints and pick, instead of
     # keeping only the final (possibly overtrained) weights
-    checkpointing_steps: int = 250
+    checkpointing_steps: int = 500
     seed: int = 42
     # FLUX.1-dev is guidance-distilled: this value becomes the guidance
     # EMBEDDING the LoRA adapts under, so it should match what serving uses.
@@ -74,9 +76,9 @@ class TrainConfig():
 
 @dataclass
 class SweepConfig():
-    # 1e-4 won the v2.1 sweep (5e-5 kept tinted backgrounds longer)
-    learning_rates = [1e-4] # previous runs: 1e-6 (too low), 5e-5, 2e-4
-    train_steps = [1500] # ≈ 146 epochs at batch 4; eval checkpoints at 250-step intervals
+    # full-batch replication of the prod recipe (see TrainConfig note)
+    learning_rates = [2e-4]
+    train_steps = [4200] # full-batch: steps == epochs
     ranks = [16]
 
 def generate_sweep_configs(sweep_config: SweepConfig):
@@ -94,8 +96,8 @@ def generate_sweep_configs(sweep_config: SweepConfig):
             "rank": rank,
             # derive the folder from the actual params so names can't drift
             # from reality (FOLDER_3/4 said steps_4200 while the sweep ran 4100)
-            # dsv3 prefix: dataset v3 (owner icons + style captions) runs
-            "output_dir": f"{MODEL_DIR}/dsv3_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
+            # dsv3fb prefix: dataset v3, full-batch prod-recipe replication
+            "output_dir": f"{MODEL_DIR}/dsv3fb_lr_{lr}_steps_{steps}_rank_{rank}_bs_{batch_size}",
         }
         for lr, steps, rank in param_combinations
     ]
