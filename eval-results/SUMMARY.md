@@ -113,3 +113,17 @@ lr sweep 1e-4 vs 5e-5.
   (rocket→sky, snail→leaf-green). Root cause: training captions never say
   "on a white background". Serving-side fix under eval (white_bg template);
   training-side fix for next round: append the phrase to dataset captions.
+
+## Template shootout + final recipe (2026-07-16)
+
+`09_template_shootout.png` — owner's reference style is chunky 8-bit with
+thick black outlines. On the v2.1 winners, the template
+"a PXCON, a simple chunky 8-bit pixel art icon of {prompt}, thick black
+outline, flat colors, on a plain white background" at guidance 5.0 nails it:
+pure white backgrounds, uniform chunky cells, bold outlines, subjects intact.
+"8-bit" alone changes little; "+ on a white background" fixes tints while
+keeping the finer 16-bit look — a good alternate style.
+
+**Final staging recipe: base FLUX.1-dev + graceyun/dotelier-pixel-v21-ckpt1000
+(fused), 28 steps, guidance 5.0, the chunky-8-bit template above.**
+Known nit: "cup of coffee" tends to lose its handle with the chunky template.

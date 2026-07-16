@@ -36,7 +36,10 @@ cuda_dev_image = ModalImage.from_registry(
 # container image layer. This avoids ~22GB HuggingFace downloads on cold start.
 MODEL_DIR = "/model"
 BASE_MODEL = "black-forest-labs/FLUX.1-dev"
-LORA_REPO = "graceyun/dotelier-pixel-v2-ckpt750"
+# v2.1 winner: dataset v2.1 (crisp, 62% fill), lr 1e-4, checkpoint 1000.
+# Template + guidance below are part of the recipe (template shootout,
+# eval-results/09_template_shootout.png).
+LORA_REPO = "graceyun/dotelier-pixel-v21-ckpt1000"
 LORA_WEIGHTS = "pytorch_lora_weights.safetensors"
 
 
@@ -106,7 +109,7 @@ app = App(name="dotelier-api-staging")
 config = {
    "num_outputs": 1,
    "num_inference_steps": 28,
-   "guidance_scale": 3.5,
+   "guidance_scale": 5.0,
    "default_style": "color",
    "allowed_origins": [
     "https://dotelier.studio",
@@ -229,7 +232,7 @@ class PixelModel:
             self.pipeline.unload_lora_weights()
 
             _ = self.pipeline(
-                "a PXCON, a 16-bit pixel art icon of a floppy disk",
+                self.generate_prompt("a floppy disk"),
                 num_inference_steps=5,
                 guidance_scale=config["guidance_scale"],
             )
@@ -246,7 +249,10 @@ class PixelModel:
             raise
 
     def generate_prompt(self, prompt: str):
-        return f"a PXCON, a 16-bit pixel art icon of {prompt}"
+        return (
+            f"a PXCON, a simple chunky 8-bit pixel art icon of {prompt}, "
+            "thick black outline, flat colors, on a plain white background"
+        )
 
     @method()
     def inference(self, input: InputModel) -> InferenceResult:
