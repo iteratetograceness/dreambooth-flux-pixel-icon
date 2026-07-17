@@ -35,10 +35,15 @@ Pipeline:
    (separate Modal app + endpoint label; NEVER overwrite the prod
    `dotelier-api` without explicit owner approval). Owner points the dotelier
    frontend at staging or hits it directly to compare.
-   → current (2026-07-16, round 3): `api_staging.py` serves the dataset-v3
-   retrain `graceyun/dotelier-pixel-v3-ckpt1000` (fused) at 28 steps /
-   guidance 5.0 with the caption-matched template (eval-results
-   10_dsv3_round3.png; smoke: rocket + guitar fixed).
+   → current (2026-07-17, round 4): `api_staging.py` serves
+   `graceyun/dotelier-pixel-v4-ckpt1500` (fused) at 28 steps / guidance 5.0
+   with the caption-matched template. v4 = prod's full-batch recipe
+   (effective bs48, lr 2e-4) on the clean v3 dataset, checkpoint-1500 —
+   peak of the 1000–2000 plateau before overfit onset. Final grids:
+   eval-results 17_final_std.png / 18_final_novel.png — v4 near-sweeps prod
+   at ~4x lower latency. Promotion recipe: copy LORA_REPO + config values +
+   generate_prompt from api_staging.py into api.py (keep prod buffer
+   settings), deploy.
    https://iteratetograceness--dotelier-api-staging.modal.run
 6. **Promotion** — on owner's "promote": swap `LORA_REPO` + settings in
    api.py (copy the values from api_staging.py, but keep prod's
