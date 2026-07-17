@@ -58,9 +58,11 @@ class TrainConfig():
     # from full-batch descent (bs=41, lr 2e-4, ~4200 epochs) squeezed through
     # rank 16 — deep style convergence without literal memorization. This run
     # replicates that recipe on the clean v3 data (47 images).
+    # bs=12 x accum=4 = effective 48 ≈ full batch: identical noise-free
+    # descent, but avoids the silent hang a literal bs=47 hit at model load.
     # (The "textbook" recipe was bs=4 / lr 1e-4 / 1500 steps.)
-    train_batch_size: int = 47
-    gradient_accumulation_steps: int = 1
+    train_batch_size: int = 12
+    gradient_accumulation_steps: int = 4
     lr_scheduler: str = "constant_with_warmup"
     lr_warmup_steps: int = 100
     # checkpoint often so eval.py can compare checkpoints and pick, instead of
