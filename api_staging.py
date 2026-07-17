@@ -36,10 +36,11 @@ cuda_dev_image = ModalImage.from_registry(
 # container image layer. This avoids ~22GB HuggingFace downloads on cold start.
 MODEL_DIR = "/model"
 BASE_MODEL = "black-forest-labs/FLUX.1-dev"
-# round-3 winner: dataset v3 (owner thin-geometry icons + style-baked
-# captions), lr 1e-4, checkpoint 1000. Template must match the training
-# captions exactly (eval-results/10_dsv3_round3.png).
-LORA_REPO = "graceyun/dotelier-pixel-v3-ckpt1000"
+# round-4 winner: full-batch prod-recipe replication on dataset v3
+# (effective bs48, lr 2e-4), checkpoint 1500 — peak of the 1000-2000
+# plateau before overfit onset (eval-results/16_* trajectory, 17/18 finals).
+# Template must match the training captions exactly.
+LORA_REPO = "graceyun/dotelier-pixel-v4-ckpt1500"
 LORA_WEIGHTS = "pytorch_lora_weights.safetensors"
 
 

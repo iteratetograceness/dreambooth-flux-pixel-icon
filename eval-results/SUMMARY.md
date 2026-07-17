@@ -168,3 +168,18 @@ captions rewritten to bake in the style phrase. Trained dsv3 lr1e-4.
   adds glitch artifacts + PXCON text; 5.0 (staging today) is already the
   best. Verdict: data problem, not a dial problem — the full-batch
   replication run (dsv3fb) and/or more training icons is the path.
+
+## Round 4 outcome: full-batch replication — the v4 winner (2026-07-17)
+
+Trajectory on the novel suite (`16_fb_novel_*.png`): climb (ckpt-500, mixed)
+→ peak plateau (1000–2000, semantic failures healed, prod-level novel
+prompts in the target style) → decay onset at 2500 (motif bleed, photo
+texture) → gentle decline at 3000. The deep-convergence hypothesis held.
+
+**Winner: checkpoint-1500** (1000's crispness + pizza fix, before 2000's
+softness) → `graceyun/dotelier-pixel-v4-ckpt1500`, now on staging.
+
+Final grids `17_final_std.png` / `18_final_novel.png` (prod vs v4, seed 42):
+v4 wins nearly every standard-suite row — coffee cup regains its handle,
+snail is a snail (prod draws a flower), guitar/rocket/lighthouse/pancakes
+all clearly better — at ~4x lower latency (28 steps vs 50, ~3s vs ~12s).
